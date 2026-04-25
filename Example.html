@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>数字手账 视网膜引擎版</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <style>
+        :root { --safe-area-bottom: env(safe-area-inset-bottom, 20px); }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        /* 手账底纹 */
+        #paper-texture { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; transition: all 0.3s ease; }
+        .bg-theme-grid { background-color: #F4F1EA; background-image: radial-gradient(#d0c9b4 1px, transparent 1px); background-size: 24px 24px; }
+        .bg-theme-lined { background-color: #F8F5F0; background-image: linear-gradient(transparent 95%, #e1d8c1 95%); background-size: 100% 32px; }
+        .bg-theme-kraft { background-color: #EBE1D0; background-image: radial-gradient(rgba(0,0,0,0.06) 1px, transparent 1px); background-size: 16px 16px; }
+        .bg-theme-blank { background-color: #FAFAFA; }
+
+        #canvas-wrapper { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        
+        input[type="file"], input[type="color"] { display: none !important; }
+        .quick-native-color-picker { position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+
+        .glass-panel { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); border-top: 1px solid rgba(255, 255, 255, 0.6); box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.05); }
+        .tool-btn { transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s; }
+        .tool-btn.active { color: #000; transform: scale(1.1); font-weight: bold; }
+
+        #drawer { transform: translateY(100%); transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1); }
+        #drawer.open { transform: translateY(0); }
+        .effect-btn.active { border-color: #000; background-color: #000; color: white; }
+        
+        .brush-scroll { display: flex; gap: 1rem; overflow-x: auto; padding-bottom: 10px; scroll-snap-type: x mandatory; }
+        .brush-scroll::-webkit-scrollbar { display: none; }
+        .brush-item { flex: 0 0 auto; scroll-snap-align: start; opacity: 0.4; transition: all 0.2s; }
+        .brush-item.active { opacity: 1; transform: scale(1.15) translateY(-2px); }
+
+        .rainbow-bg { background: conic-gradient(red, yellow, lime, aqua, blue, magenta, red); }
+        .hide-for-screenshot { opacity: 0 !important; pointer-events: none !important; transition: opacity 0.3s ease; }
+
+        #recording-indicator {
+            display: none; position: absolute; top: 80px; left: 50%; transform: translateX(-50%);
+            background: rgba(255, 59, 48, 0.9); color: white; padding: 6px 16px; border-radius: 20px;
+            font-size: 12px; font-weight: bold; z-index: 30; animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse { 0% { opacity: 1; box-shadow: 0 0 0 0 rgba(255,59,48,0.7); } 70% { opacity: 0.8; box-shadow: 0 0 0 10px rgba(255,59,48,0); } 100% { opacity: 1; } }
+        
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        #screenshot-hint {
+            display: none; position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7); color: white; padding: 8px 16px; border-radius: 20px;
+            font-size: 14px; z-index: 60; pointer-events: none; animation: fadeOut 3s forwards;
+        }
+        @keyframes fadeOut { 0% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } }
+        #screenshot-overlay { position: fixed; inset: 0; z-index: 50; display: none; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <div id="paper-texture" class="bg-theme-grid"></div>
+    <div id="canvas-wrapper"><canvas id="main-canvas"></canvas></div>
+
+    <div id="screenshot-overlay"></div>
+    <div id="screenshot-hint">截屏后，点击屏幕任意处恢复操作区</div>
+
+    <!-- 顶部状态栏 -->
+    <div id="top-bar" class="absolute top-0 left-0 w-full px-3 pt-safe flex justify-between items-center z-20 pointer-events-none mt-4 transition-opacity duration-300">
+        <div class="flex gap-2 pointer-events-auto">
+            <button id="btn-undo" class="w-10 h-10 rounded-full bg-white/90 shadow-sm flex items-center justify-center text-gray-700 active:scale-95 transition-transform" title="撤回">
+                <i class="ph ph-arrow-u-up-left text-xl"></i>
+            </button>
+            <button id="btn-change-paper" class="w-10 h-10 rounded-full bg-white/90 shadow-sm flex items-center justify-center text-orange-500 active:scale-95 transition-transform" title="更换纸张">
+                <i class="ph ph-notebook text-xl"></i>
+            </button>
+            <button id="btn-auto-layout" class="px-3 py-2 rounded-full bg-gradient-to-r from-orange-400 to-pink-500 text-white text-xs font-bold shadow-md flex items-center gap-1 active:scale-95 hidden">
+                <i class="ph ph-magic-wand"></i> 排版
+            </button>
+            <button id="btn-reset-view" class="px-3 py-2 rounded-full bg-blue-50 text-blue-600 border border-blue-200 text-xs font-bold shadow-md flex items-center gap-1 active:scale-95 hidden">
+                <i class="ph ph-corners-out"></i> 居中
+            </button>
+        </div>
+        
+        <div class="flex gap-2 pointer-events-auto">
+            <button id="btn-save-img" class="w-10 h-10 rounded-full bg-blue-600 text-white shadow-sm flex items-center justify-center active:scale-95 transition-transform" title="生成高清图片">
+                <i class="ph-fill ph-download-simple text-xl"></i>
+            </button>
+            <button id="btn-screenshot-mode" class="px-3 py-2 bg-blue-600 text-white rounded-full font-medium text-sm flex items-center gap-1 shadow-md active:scale-95 transition-transform">
+                <i class="ph-fill ph-camera text-lg"></i>
+            </button>
+            <button id="btn-play-record" class="w-10 h-10 rounded-full bg-black shadow-sm flex items-center justify-center text-white active:scale-95 transition-transform" title="生成带底纹视频">
+                <i class="ph-fill ph-video-camera text-xl"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- 高清存图弹窗 -->
+    <div id="save-modal" class="fixed inset-0 bg-black/95 hidden flex-col items-center justify-center p-6 z-[9999]">
+        <div class="text-white mb-4 text-center">
+            <i class="ph ph-check-circle text-4xl text-green-400 mb-2"></i>
+            <p class="font-bold text-lg">完美质感合成</p>
+            <p class="text-sm text-gray-400 mt-1">请<span class="text-white font-bold">长按下方图片</span>保存到相册</p>
+        </div>
+        <div class="relative w-full max-h-[65vh] flex justify-center items-center overflow-hidden rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+            <img id="save-img-result" class="max-w-full max-h-[65vh] object-contain" src="" />
+            <div id="save-loading" class="absolute inset-0 flex items-center justify-center bg-gray-900/80">
+                <i class="ph ph-spinner animate-spin text-white text-3xl"></i>
+            </div>
+        </div>
+        <button onclick="document.getElementById('save-modal').classList.add('hidden')" class="mt-8 px-8 py-3 bg-white text-black rounded-full font-bold active:scale-95 transition-transform">
+            完成关闭
+        </button>
+    </div>
+
+    <div id="recording-indicator">🔴 正在录制视频...</div>
+    <div id="toast" class="fixed top-[100px] left-1/2 -translate-x-1/2 bg-black/80 text-white px-5 py-2.5 rounded-full text-sm font-medium opacity-0 pointer-events-none transition-opacity duration-300 z-50"></div>
+
+    <!-- 动态面板容器 -->
+    <div id="dynamic-panel" class="absolute top-20 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md px-3 py-2 rounded-2xl shadow-lg flex items-center gap-2 z-20 opacity-0 pointer-events-none transition-opacity w-max max-w-[95vw] overflow-x-auto no-scrollbar">
+        <div id="fx-tools" class="flex items-center gap-1.5 hidden">
+            <button data-effect="none" class="effect-btn active flex-shrink-0 px-3 py-1.5 rounded-full border border-gray-200 text-xs font-medium">普通</button>
+            <button data-effect="knockout" class="effect-btn flex-shrink-0 px-3 py-1.5 rounded-full border border-gray-200 text-xs font-medium text-purple-600"><i class="ph-fill ph-eraser"></i> 镂空</button>
+            <button data-effect="neon" class="effect-btn flex-shrink-0 px-3 py-1.5 rounded-full border border-gray-200 text-xs font-medium text-pink-500">发光</button>
+            <button data-effect="emboss" class="effect-btn flex-shrink-0 px-3 py-1.5 rounded-full border border-gray-200 text-xs font-medium text-gray-600">立体</button>
+            
+            <div class="w-px h-5 bg-gray-200 mx-1 flex-shrink-0"></div>
+            <div id="quick-color-tools" class="flex items-center gap-2 flex-shrink-0">
+                <label class="relative w-6 h-6 rounded-full rainbow-bg shadow-sm cursor-pointer hover:scale-110 flex-shrink-0 border-2 border-white">
+                    <input type="color" class="quick-native-color-picker">
+                </label>
+                <div class="w-5 h-5 rounded-full bg-[#111827] cursor-pointer border shadow-sm flex-shrink-0" onclick="changeSelectedColor('#111827')"></div>
+                <div class="w-5 h-5 rounded-full bg-[#ffffff] cursor-pointer border shadow-sm flex-shrink-0" onclick="changeSelectedColor('#ffffff')"></div>
+            </div>
+        </div>
+
+        <div id="img-tools" class="flex items-center gap-2 hidden">
+            <button id="btn-lock" class="flex-shrink-0 px-3 py-1.5 rounded-full border border-gray-200 text-xs font-medium flex items-center gap-1 text-gray-700">
+                <i class="ph ph-lock-key-open"></i> <span id="lock-text">锁定底图</span>
+            </button>
+            <button id="btn-layer-up" class="flex-shrink-0 px-3 py-1.5 rounded-full border border-gray-200 text-xs font-medium flex items-center gap-1 text-gray-700"><i class="ph ph-arrow-line-up"></i> 上移</button>
+            <button id="btn-layer-down" class="flex-shrink-0 px-3 py-1.5 rounded-full border border-gray-200 text-xs font-medium flex items-center gap-1 text-gray-700"><i class="ph ph-arrow-line-down"></i> 下移</button>
+        </div>
+
+        <div class="w-px h-5 bg-gray-200 mx-1 flex-shrink-0"></div>
+        <button id="btn-delete-obj" class="flex-shrink-0 p-1.5 rounded-full text-red-500 bg-red-50 active:bg-red-100"><i class="ph ph-trash text-lg"></i></button>
+    </div>
+
+    <!-- 笔刷抽屉 -->
+    <div id="drawer" class="absolute bottom-[75px] left-0 w-full bg-white rounded-t-3xl shadow-[0_-15px_40px_rgba(0,0,0,0.08)] z-10 pb-6 transition-transform duration-300">
+        <div id="drawer-handle" class="w-full pt-3 pb-2 cursor-pointer flex justify-center active:bg-gray-50 rounded-t-3xl">
+            <div class="w-12 h-1.5 bg-gray-300 rounded-full"></div>
+        </div>
+        
+        <div class="px-5 space-y-4">
+            <div class="brush-scroll px-1">
+                <button class="brush-item flex flex-col items-center gap-1 active" data-type="pen"><div class="w-12 h-12 rounded-full bg-gray-50 flex items-center justify-center border-2 border-transparent"><i class="ph ph-pen-nib text-2xl"></i></div><span class="text-[10px] font-medium">极致顺滑</span></button>
+                <button class="brush-item flex flex-col items-center gap-1" data-type="hollow"><div class="w-12 h-12 rounded-full bg-gray-50 flex items-center justify-center border-2 border-transparent"><i class="ph ph-circle text-2xl text-blue-500 font-bold"></i></div><span class="text-[10px] font-medium">中空标题</span></button>
+                <button class="brush-item flex flex-col items-center gap-1" data-type="chubby"><div class="w-12 h-12 rounded-full bg-gray-50 flex items-center justify-center border-2 border-transparent"><i class="ph ph-smiley text-2xl text-pink-400"></i></div><span class="text-[10px] font-medium">胖胖圆体</span></button>
+                <button class="brush-item flex flex-col items-center gap-1" data-type="jitter"><div class="w-12 h-12 rounded-full bg-gray-50 flex items-center justify-center border-2 border-transparent"><i class="ph ph-wave-sine text-2xl text-purple-500"></i></div><span class="text-[10px] font-medium">可爱手抖</span></button>
+                <button class="brush-item flex flex-col items-center gap-1" data-type="pencil"><div class="w-12 h-12 rounded-full bg-gray-50 flex items-center justify-center border-2 border-transparent"><i class="ph ph-pencil-simple text-2xl text-gray-600"></i></div><span class="text-[10px] font-medium">素描铅笔</span></button>
+                <button class="brush-item flex flex-col items-center gap-1" data-type="chalk"><div class="w-12 h-12 rounded-full bg-gray-50 flex items-center justify-center border-2 border-transparent"><i class="ph ph-chalkboard text-2xl text-orange-400"></i></div><span class="text-[10px] font-medium">颗粒粉笔</span></button>
+            </div>
+            
+            <div class="flex items-center gap-4 px-1">
+                <i class="ph ph-minus text-gray-400 text-sm"></i>
+                <input type="range" id="brush-size" min="1" max="50" value="8" class="flex-1 accent-black h-1.5 bg-gray-200 rounded-lg appearance-none">
+                <i class="ph ph-plus text-gray-400 text-sm"></i>
+            </div>
+            
+            <div class="flex items-center gap-3 overflow-x-auto pb-1 px-1 no-scrollbar">
+                <label class="relative w-8 h-8 rounded-full rainbow-bg shadow-md cursor-pointer hover:scale-110 transition-transform flex-shrink-0 border-2 border-white">
+                    <input type="color" id="native-brush-color" class="quick-native-color-picker">
+                </label>
+                <div class="w-px h-6 bg-gray-200 mx-1 flex-shrink-0"></div>
+                <div class="w-7 h-7 rounded-full bg-[#111827] cursor-pointer border-2 border-gray-400 scale-110 shadow-sm flex-shrink-0 preset-color" data-color="#111827"></div>
+                <div class="w-7 h-7 rounded-full bg-[#ffffff] cursor-pointer border-2 border-transparent shadow-sm flex-shrink-0 preset-color" data-color="#ffffff"></div>
+                <div class="w-7 h-7 rounded-full bg-[#EF4444] cursor-pointer border-2 border-transparent shadow-sm flex-shrink-0 preset-color" data-color="#EF4444"></div>
+                <div class="w-7 h-7 rounded-full bg-[#3B82F6] cursor-pointer border-2 border-transparent shadow-sm flex-shrink-0 preset-color" data-color="#3B82F6"></div>
+                <div class="w-7 h-7 rounded-full bg-[#10B981] cursor-pointer border-2 border-transparent shadow-sm flex-shrink-0 preset-color" data-color="#10B981"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 底部导航 -->
+    <div id="bottom-nav" class="absolute bottom-0 left-0 w-full glass-panel pb-[var(--safe-area-bottom)] z-20 transition-opacity duration-300">
+        <div class="flex justify-around items-center h-[70px] px-2">
+            <button id="btn-select" class="tool-btn w-16 h-full flex flex-col items-center justify-center text-gray-400 gap-1 active">
+                <i class="ph ph-selection-all text-[26px]"></i><span class="text-[10px]">选择排版</span>
+            </button>
+            <div class="relative w-16 h-full flex justify-center">
+                <button id="btn-draw" class="tool-btn absolute -top-4 w-14 h-14 rounded-full bg-black text-white shadow-lg flex items-center justify-center border-4 border-white">
+                    <i class="ph ph-pencil-simple text-2xl"></i>
+                </button>
+                <span class="absolute bottom-1 text-[10px] text-gray-500">写字</span>
+            </div>
+            <label for="image-upload" class="tool-btn w-16 h-full flex flex-col items-center justify-center text-gray-400 gap-1 cursor-pointer">
+                <i class="ph ph-image-square text-[26px]"></i><span class="text-[10px]">加照片</span>
+            </label>
+            <input type="file" id="image-upload" accept="image/*">
+        </div>
+    </div>
+
+    <script>
+        const toast = document.getElementById('toast');
+        function showToast(msg) { toast.innerText = msg; toast.classList.remove('opacity-0'); setTimeout(() => toast.classList.add('opacity-0'), 2500); }
+
+        // --- 画布初始化 ---
+        const canvas = new fabric.Canvas('main-canvas', {
+            isDrawingMode: false, selection: true, selectionColor: 'rgba(0,0,0,0.05)',
+            selectionBorderColor: '#111827', selectionLineWidth: 1.5, preserveObjectStacking: true, selectionFullyContained: false 
+        });
+
+        function resizeCanvas() { canvas.setWidth(window.innerWidth); canvas.setHeight(window.innerHeight); canvas.renderAll(); }
+        window.addEventListener('resize', resizeCanvas); resizeCanvas();
+
+        let drawHistory = []; let undoStack = [];
+        let currentBrushType = 'pen'; let currentBrushColor = '#111827'; let currentBrushSize = 8;
+        let isScreenshotMode = false;
+
+        // --- 双指缩放平移 ---
+        let isPinching = false; let initialDist = 0; let initialZoom = 1; let lastCenter = { x: 0, y: 0 };
+        const wrapper = document.getElementById('canvas-wrapper'); const btnResetView = document.getElementById('btn-reset-view');
+
+        wrapper.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2 && !isScreenshotMode) {
+                isPinching = true; canvas.isDrawingMode = false;
+                let p1 = e.touches[0]; let p2 = e.touches[1];
+                initialDist = Math.hypot(p1.clientX - p2.clientX, p1.clientY - p2.clientY);
+                initialZoom = canvas.getZoom(); lastCenter = { x: (p1.clientX + p2.clientX)/2, y: (p1.clientY + p2.clientY)/2 };
+                btnResetView.classList.remove('hidden');
+            }
+        }, {passive: false});
+
+        wrapper.addEventListener('touchmove', (e) => {
+            if (isPinching && e.touches.length === 2) {
+                e.preventDefault(); let p1 = e.touches[0]; let p2 = e.touches[1];
+                let currentDist = Math.hypot(p1.clientX - p2.clientX, p1.clientY - p2.clientY);
+                let zoom = initialZoom * (currentDist / initialDist);
+                if (zoom > 5) zoom = 5; if (zoom < 0.2) zoom = 0.2;
+                let currentCenter = { x: (p1.clientX + p2.clientX)/2, y: (p1.clientY + p2.clientY)/2 };
+                canvas.zoomToPoint({x: currentCenter.x, y: currentCenter.y}, zoom);
+                canvas.relativePan({ x: currentCenter.x - lastCenter.x, y: currentCenter.y - lastCenter.y });
+                lastCenter = currentCenter;
+            }
+        }, {passive: false});
+
+        wrapper.addEventListener('touchend', (e) => {
+            if (e.touches.length < 2 && isPinching) {
+                isPinching = false; if (document.getElementById('btn-draw').classList.contains('active') && !isScreenshotMode) canvas.isDrawingMode = true;
+            }
+        });
+        btnResetView.addEventListener('click', () => { canvas.setViewportTransform([1,0,0,1,0,0]); btnResetView.classList.add('hidden'); });
+
+        // --- 截图模式 ---
+        const topBar = document.getElementById('top-bar'); const bottomNav = document.getElementById('bottom-nav');
+        const dynamicPanel = document.getElementById('dynamic-panel'); const screenshotHint = document.getElementById('screenshot-hint');
+        const screenshotOverlay = document.getElementById('screenshot-overlay');
+
+        document.getElementById('btn-screenshot-mode').addEventListener('click', () => {
+            isScreenshotMode = true; canvas.discardActiveObject(); document.getElementById('drawer').classList.remove('open');
+            topBar.classList.add('hide-for-screenshot'); bottomNav.classList.add('hide-for-screenshot'); dynamicPanel.classList.add('hide-for-screenshot');
+            screenshotOverlay.style.display = 'block'; screenshotHint.style.display = 'block'; screenshotHint.style.animation = 'none'; void screenshotHint.offsetWidth; screenshotHint.style.animation = 'fadeOut 3s forwards';
+        });
+
+        screenshotOverlay.addEventListener('click', () => {
+            isScreenshotMode = false;
+            topBar.classList.remove('hide-for-screenshot'); bottomNav.classList.remove('hide-for-screenshot');
+            screenshotHint.style.display = 'none'; screenshotOverlay.style.display = 'none'; showToast('已恢复操作面板');
+        });
+
+        // --- 背景底本生成器 ---
+        const themes = ['bg-theme-grid', 'bg-theme-lined', 'bg-theme-kraft', 'bg-theme-blank'];
+        const paperNames = ['简约网格', '学霸横线', '复古牛皮', '纯净白底'];
+        let currentThemeIndex = 0;
+        
+        document.getElementById('btn-change-paper').addEventListener('click', () => {
+            const paper = document.getElementById('paper-texture');
+            paper.classList.remove(themes[currentThemeIndex]); currentThemeIndex = (currentThemeIndex + 1) % themes.length; paper.classList.add(themes[currentThemeIndex]);
+            showToast(`已切换底本: ${paperNames[currentThemeIndex]}`);
+        });
+
+        function getThemePattern(ctx) {
+            const pCanvas = document.createElement('canvas'); const pCtx = pCanvas.getContext('2d');
+            if (currentThemeIndex === 0) {
+                pCanvas.width = 24; pCanvas.height = 24;
+                pCtx.fillStyle = '#F4F1EA'; pCtx.fillRect(0, 0, 24, 24);
+                pCtx.fillStyle = '#d0c9b4'; pCtx.beginPath(); pCtx.arc(12, 12, 1.2, 0, Math.PI*2); pCtx.fill();
+            } else if (currentThemeIndex === 1) {
+                pCanvas.width = 32; pCanvas.height = 32;
+                pCtx.fillStyle = '#F8F5F0'; pCtx.fillRect(0, 0, 32, 32);
+                pCtx.fillStyle = '#e1d8c1'; pCtx.fillRect(0, 30, 32, 2);
+            } else if (currentThemeIndex === 2) {
+                pCanvas.width = 16; pCanvas.height = 16;
+                pCtx.fillStyle = '#EBE1D0'; pCtx.fillRect(0, 0, 16, 16);
+                pCtx.fillStyle = 'rgba(0,0,0,0.06)'; pCtx.beginPath(); pCtx.arc(8, 8, 1, 0, Math.PI*2); pCtx.fill();
+            } else {
+                pCanvas.width = 32; pCanvas.height = 32;
+                pCtx.fillStyle = '#FAFAFA'; pCtx.fillRect(0, 0, 32, 32);
+            }
+            return ctx.createPattern(pCanvas, 'repeat');
+        }
+
+        function createNoiseTexture(color) {
+            const size = 64; const tCanvas = document.createElement('canvas'); tCanvas.width = size; tCanvas.height = size; const ctx = tCanvas.getContext('2d');
+            ctx.fillStyle = color; ctx.fillRect(0, 0, size, size);
+            for(let i=0; i<800; i++) { ctx.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.3)'; ctx.fillRect(Math.random()*size, Math.random()*size, 1.5, 1.5); }
+            return new fabric.Pattern({ source: tCanvas, repeat: 'repeat' });
+        }
+
+        // --- 笔刷渲染引擎 ---
+        function updateBrush() {
+            canvas.freeDrawingBrush = new fabric.PencilBrush(canvas); canvas.freeDrawingBrush.color = currentBrushColor;
+            if (currentBrushType === 'pen') { canvas.freeDrawingBrush.width = currentBrushSize; canvas.freeDrawingBrush.decimate = 15; } 
+            else if (currentBrushType === 'chubby') { canvas.freeDrawingBrush.width = currentBrushSize * 3; canvas.freeDrawingBrush.decimate = 25; } 
+            else if (currentBrushType === 'jitter') { canvas.freeDrawingBrush.width = currentBrushSize * 1.5; canvas.freeDrawingBrush.decimate = 1; } 
+            else if (currentBrushType === 'pencil' || currentBrushType === 'chalk') { canvas.freeDrawingBrush.width = currentBrushType==='chalk' ? currentBrushSize*2.5 : currentBrushSize*1.5; canvas.freeDrawingBrush.decimate = 3; canvas.freeDrawingBrush.color = createNoiseTexture(currentBrushColor); } 
+            else if (currentBrushType === 'hollow') { canvas.freeDrawingBrush.width = currentBrushSize * 2.5; canvas.freeDrawingBrush.decimate = 5; }
+            else if (currentBrushType === 'variable') { canvas.freeDrawingBrush.width = currentBrushSize * 1.5; canvas.freeDrawingBrush.decimate = 2; }
+        }
+
+        canvas.on('mouse:down', (e) => { 
+            if (canvas.isDrawingMode) { document.getElementById('drawer').classList.remove('open'); return; }
+            if (e.target && e.target.customType === 'background-image' && e.target.isLockedByUser) { canvas.setActiveObject(e.target); canvas.renderAll(); }
+        });
+
+        canvas.on('path:created', function(opt) {
+            let path = opt.path; path.set({ strokeLineCap: 'round', strokeLineJoin: 'round' });
+            
+            if (currentBrushType === 'jitter') {
+                const pathData = path.path;
+                for(let i=0; i<pathData.length; i++) {
+                    let cmd = pathData[i];
+                    if (cmd[0] === 'Q') { cmd[1] += (Math.random()-0.5)*6; cmd[2] += (Math.random()-0.5)*6; cmd[3] += (Math.random()-0.5)*6; cmd[4] += (Math.random()-0.5)*6; } else if (cmd[0] === 'L') { cmd[1] += (Math.random()-0.5)*6; cmd[2] += (Math.random()-0.5)*6; }
+                }
+                const newPath = new fabric.Path(pathData, { fill: null, stroke: currentBrushColor, strokeWidth: path.strokeWidth, strokeLineCap: 'round', strokeLineJoin: 'round' });
+                canvas.remove(path); path = newPath; canvas.add(path);
+            } 
+            else if (currentBrushType === 'hollow') {
+                const outlinePath = new fabric.Path(path.path, { fill: null, stroke: currentBrushColor, strokeWidth: path.strokeWidth, strokeLineCap: 'round', strokeLineJoin: 'round' });
+                const innerPath = new fabric.Path(path.path, { fill: null, stroke: 'white', strokeWidth: path.strokeWidth * 0.55, strokeLineCap: 'round', strokeLineJoin: 'round', globalCompositeOperation: 'destination-out' });
+                const group = new fabric.Group([outlinePath, innerPath], { customType: 'handwriting', isHollow: true });
+                canvas.remove(path); path = group; canvas.add(path);
+            }
+
+            if (currentBrushType === 'pencil' || currentBrushType === 'chalk') path.set({ opacity: 0.85 });
+            if (currentBrushType === 'variable') path.set({ shadow: new fabric.Shadow({ color: currentBrushColor, blur: 2, offsetX: 0.5, offsetY: 0.5 }) }); 
+
+            if (!path.customType) path.customType = 'handwriting';
+            drawHistory.push({ obj: path, type: 'path', isHollow: path.isHollow }); undoStack.push({ action: 'add', obj: path }); canvas.renderAll();
+        });
+
+        // 颜色选取逻辑
+        document.getElementById('native-brush-color').addEventListener('input', (e) => { currentBrushColor = e.target.value; document.querySelectorAll('.preset-color').forEach(c => c.classList.remove('scale-110', 'border-gray-400')); updateBrush(); });
+        document.querySelectorAll('.preset-color').forEach(btn => { btn.addEventListener('click', (e) => { document.querySelectorAll('.preset-color').forEach(c => c.classList.remove('scale-110', 'border-gray-400')); e.target.classList.add('scale-110', 'border-gray-400'); currentBrushColor = e.target.getAttribute('data-color'); updateBrush(); }); });
+
+        window.changeSelectedColor = function(color) {
+            const activeObjects = canvas.getActiveObjects(); if (!activeObjects.length) return;
+            activeObjects.forEach(obj => {
+                if(obj.isHollow) { obj._objects[0].set({ stroke: color }); } else if(obj.type === 'path') { if(obj.stroke instanceof fabric.Pattern) obj.set({ stroke: createNoiseTexture(color) }); else obj.set({ stroke: color }); }
+            });
+            canvas.renderAll();
+        };
+        document.querySelectorAll('.quick-native-color-picker').forEach(picker => { picker.addEventListener('input', (e) => window.changeSelectedColor(e.target.value)); });
+
+        const drawer = document.getElementById('drawer'); const btnDraw = document.getElementById('btn-draw'); const btnSelect = document.getElementById('btn-select');
+        document.getElementById('drawer-handle').addEventListener('click', () => drawer.classList.remove('open'));
+
+        btnDraw.addEventListener('click', () => {
+            if (canvas.isDrawingMode) { drawer.classList.toggle('open'); } 
+            else { canvas.isDrawingMode = true; canvas.selection = false; btnDraw.classList.add('scale-110'); btnSelect.classList.remove('active', 'text-black'); btnSelect.classList.add('text-gray-400'); canvas.discardActiveObject(); canvas.requestRenderAll(); drawer.classList.add('open'); }
+        });
+
+        btnSelect.addEventListener('click', () => { canvas.isDrawingMode = false; canvas.selection = true; btnSelect.classList.add('active', 'text-black'); btnSelect.classList.remove('text-gray-400'); btnDraw.classList.remove('scale-110'); drawer.classList.remove('open'); });
+
+        document.querySelectorAll('.brush-item').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const target = e.currentTarget; document.querySelectorAll('.brush-item').forEach(b => { b.classList.remove('active'); b.querySelector('div').classList.remove('border-black'); });
+                target.classList.add('active'); target.querySelector('div').classList.add('border-black'); currentBrushType = target.getAttribute('data-type'); updateBrush();
+            });
+        });
+        document.getElementById('brush-size').addEventListener('input', updateBrush);
+
+
+        canvas.on('selection:created', handleSelection); canvas.on('selection:updated', handleSelection);
+        canvas.on('selection:cleared', () => { dynamicPanel.classList.add('opacity-0', 'pointer-events-none'); document.getElementById('btn-auto-layout').classList.add('hidden'); });
+
+        function updateLockBtnUI(obj) {
+            const btnLock = document.getElementById('btn-lock');
+            if (obj.isLockedByUser) { btnLock.innerHTML = '<i class="ph-fill ph-lock-key text-red-500"></i> <span class="text-red-500" id="lock-text">点击解锁</span>'; } else { btnLock.innerHTML = '<i class="ph ph-lock-key-open"></i> <span id="lock-text">锁定底图</span>'; }
+        }
+
+        function handleSelection() {
+            if (canvas.isDrawingMode) return;
+            const activeObj = canvas.getActiveObject(); if (!activeObj) return;
+
+            dynamicPanel.classList.remove('opacity-0', 'pointer-events-none');
+            document.getElementById('fx-tools').classList.add('hidden'); document.getElementById('img-tools').classList.add('hidden'); document.getElementById('btn-auto-layout').classList.add('hidden');
+
+            if (activeObj.type === 'activeSelection') { const onlyHandwriting = activeObj._objects.every(o => o.customType === 'handwriting'); if (onlyHandwriting) document.getElementById('btn-auto-layout').classList.remove('hidden'); }
+
+            if (activeObj.customType === 'background-image') {
+                document.getElementById('img-tools').classList.remove('hidden'); updateLockBtnUI(activeObj);
+            } else if (activeObj.customType === 'handwriting' || activeObj.type === 'activeSelection') {
+                document.getElementById('fx-tools').classList.remove('hidden');
+                const effectObj = activeObj.type === 'activeSelection' ? activeObj._objects[0] : activeObj; const currentEffect = effectObj.customEffect || 'none';
+                document.querySelectorAll('.effect-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-effect') === currentEffect));
+            }
+        }
+
+        document.getElementById('btn-lock').addEventListener('click', () => {
+            const activeObj = canvas.getActiveObject();
+            if (activeObj && activeObj.customType === 'background-image') {
+                const isLocked = activeObj.isLockedByUser;
+                activeObj.set({ selectable: isLocked, evented: true, lockMovementX: !isLocked, lockMovementY: !isLocked, lockRotation: !isLocked, lockScalingX: !isLocked, lockScalingY: !isLocked, hasControls: isLocked, isLockedByUser: !isLocked });
+                updateLockBtnUI(activeObj); if (!isLocked) { activeObj.set({ borderColor: 'rgba(239, 68, 68, 0.5)' }); canvas.discardActiveObject(); } else { activeObj.set({ borderColor: '#111827' }); }
+                canvas.renderAll(); showToast(isLocked ? '图层已解锁' : '图层已锁定 (再点可解锁)');
+            }
+        });
+
+        document.getElementById('btn-layer-up').addEventListener('click', () => { const o = canvas.getActiveObject(); if (o) { canvas.bringForward(o); canvas.renderAll(); } });
+        document.getElementById('btn-layer-down').addEventListener('click', () => { const o = canvas.getActiveObject(); if (o) { canvas.sendBackwards(o); canvas.renderAll(); } });
+
+        document.getElementById('btn-auto-layout').addEventListener('click', () => {
+            const activeSelection = canvas.getActiveObject(); if (!activeSelection || activeSelection.type !== 'activeSelection') return;
+            let paths = activeSelection._objects.filter(o => o.customType === 'handwriting'); if (paths.length < 2) { showToast("选中的字太少了哦"); return; }
+            let parent = {}; paths.forEach((p, i) => parent[i] = i);
+            function find(i) { if (parent[i] === i) return i; return parent[i] = find(parent[i]); }
+            function union(i, j) { let rootI = find(i); let rootJ = find(j); if (rootI !== rootJ) parent[rootI] = rootJ; }
+            for(let i=0; i<paths.length; i++) { for(let j=i+1; j<paths.length; j++) { let r1 = paths[i].getBoundingRect(); let r2 = paths[j].getBoundingRect(); let pad = 20; if(r1.left < r2.left + r2.width + pad && r1.left + r1.width + pad > r2.left && r1.top < r2.top + r2.height + pad && r1.top + r1.height + pad > r2.top) union(i, j); } }
+            let clustersMap = {}; paths.forEach((p, i) => { let root = find(i); if(!clustersMap[root]) clustersMap[root] = []; clustersMap[root].push(p); });
+            let clusterData = Object.values(clustersMap).map(arr => { let tempGroup = new fabric.Group(arr); let data = { paths: arr, left: tempGroup.left, width: tempGroup.width, top: tempGroup.top, height: tempGroup.height }; tempGroup.destroy(); return data; });
+            clusterData.sort((a, b) => a.left - b.left);
+
+            const scales = [1.3, 0.75, 1.15, 0.85, 1.25]; const rotations = [-5, 4, -3, 6, -4]; const verticalOffsets = [0, 15, -10, 18, -8];
+            let layoutOperations = []; let currentX = 0; let minY = Infinity; let maxY = -Infinity;
+            clusterData.forEach((cluster, index) => { const sIdx = index % scales.length; const scaleTarget = scales[sIdx]; const width = cluster.width * scaleTarget; const height = cluster.height * scaleTarget; const topTarget = verticalOffsets[sIdx]; layoutOperations.push({ cluster: cluster, targetScale: scaleTarget, angle: rotations[sIdx], left: currentX, top: topTarget }); currentX += width * 0.85; if (topTarget < minY) minY = topTarget; if (topTarget + height > maxY) maxY = topTarget + height; });
+            let totalWidth = currentX; let totalHeight = maxY - minY; let maxAllowedWidth = canvas.width * 0.85; let globalScale = totalWidth > maxAllowedWidth ? maxAllowedWidth / totalWidth : 1;
+            let vpt = canvas.viewportTransform; let centerX = (canvas.width / 2 - vpt[4]) / vpt[0]; let centerY = (canvas.height / 2 - vpt[5]) / vpt[3];
+            let startX = centerX - (totalWidth * globalScale) / 2; let startY = centerY - (totalHeight * globalScale) / 2 - minY * globalScale;
+
+            canvas.discardActiveObject(); 
+            layoutOperations.forEach(op => {
+                const finalLeft = startX + op.left * globalScale; const finalTop = startY + op.top * globalScale; const finalScale = op.targetScale * globalScale;
+                var sel = new fabric.ActiveSelection(op.cluster.paths, { canvas: canvas }); sel.set({ originX: 'left', originY: 'top' });
+                sel.animate('scaleX', finalScale, { duration: 500, easing: fabric.util.ease.easeOutBack }); sel.animate('scaleY', finalScale, { duration: 500, easing: fabric.util.ease.easeOutBack }); sel.animate('angle', op.angle, { duration: 500 }); sel.animate('left', finalLeft, { duration: 500, onChange: canvas.renderAll.bind(canvas) }); sel.animate('top', finalTop, { duration: 500, onComplete: () => { sel.destroy(); }}); 
+            });
+            showToast('排版魔法已施放 ✨');
+        });
+
+        document.querySelectorAll('.effect-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const effect = e.target.getAttribute('data-effect'); const activeObjects = canvas.getActiveObjects(); if (!activeObjects.length) return;
+                document.querySelectorAll('.effect-btn').forEach(b => b.classList.remove('active')); e.target.classList.add('active');
+                activeObjects.forEach(obj => {
+                    obj.customEffect = effect;
+                    if (effect === 'none') { obj.set({ globalCompositeOperation: 'source-over', shadow: null }); } 
+                    else if (effect === 'knockout') { obj.set({ globalCompositeOperation: 'destination-out', shadow: null }); }
+                    else if (effect === 'neon') { const color = obj.isHollow ? obj._objects[0].stroke : ((obj.stroke && typeof obj.stroke === 'string') ? obj.stroke : '#fff'); obj.set({ globalCompositeOperation: 'source-over', shadow: new fabric.Shadow({ color: color, blur: 12, offsetX: 0, offsetY: 0 }) }); }
+                    else if (effect === 'emboss') { obj.set({ globalCompositeOperation: 'source-over', shadow: new fabric.Shadow({ color: 'rgba(0,0,0,0.5)', blur: 2, offsetX: 3, offsetY: 3 }) }); }
+                });
+                canvas.renderAll();
+            });
+        });
+
+        document.getElementById('btn-delete-obj').addEventListener('click', () => { const activeObjects = canvas.getActiveObjects(); if (activeObjects.length) { canvas.discardActiveObject(); activeObjects.forEach(obj => canvas.remove(obj)); dynamicPanel.classList.add('opacity-0', 'pointer-events-none'); } });
+        document.getElementById('btn-undo').addEventListener('click', () => { if (undoStack.length > 0) { const last = undoStack.pop(); if (last.action === 'add') { canvas.remove(last.obj); canvas.renderAll(); } } });
+        
+        document.getElementById('image-upload').addEventListener('change', function(e) {
+            const file = e.target.files[0]; if(!file) return; const reader = new FileReader();
+            reader.onload = function(f) {
+                fabric.Image.fromURL(f.target.result, function(img) {
+                    const vpt = canvas.viewportTransform; const centerX = (canvas.width / 2 - vpt[4]) / vpt[0]; const centerY = (canvas.height / 2 - vpt[5]) / vpt[3]; const maxWidth = (canvas.width / vpt[0]) * 0.8; if (img.width > maxWidth) img.scaleToWidth(maxWidth);
+                    img.set({ left: centerX - (img.width*img.scaleX)/2, top: centerY - (img.height*img.scaleY)/2, customType: 'background-image', isLockedByUser: false, shadow: new fabric.Shadow({ color: 'rgba(0,0,0,0.15)', blur: 25, offsetX: 0, offsetY: 12 }), rx: 12, ry: 12 });
+                    canvas.add(img); canvas.sendToBack(img); canvas.setActiveObject(img); drawHistory.push({ obj: img, type: 'image' }); undoStack.push({ action: 'add', obj: img }); document.getElementById('btn-select').click(); 
+                });
+            };
+            reader.readAsDataURL(file); e.target.value = '';
+        });
+
+        // --- 双层复合底本渲染技术 (完美导出图像) ---
+        document.getElementById('btn-save-img').addEventListener('click', () => {
+            canvas.discardActiveObject(); canvas.renderAll();
+            document.getElementById('save-loading').classList.remove('hidden');
+            const saveModal = document.getElementById('save-modal');
+            saveModal.classList.remove('hidden'); saveModal.classList.add('flex');
+            
+            setTimeout(() => {
+                const multiplier = window.devicePixelRatio || 2;
+                const fabricDataURL = canvas.toDataURL({ format: 'png', multiplier: multiplier });
+                
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = canvas.width * multiplier; tempCanvas.height = canvas.height * multiplier;
+                const tCtx = tempCanvas.getContext('2d');
+                
+                tCtx.scale(multiplier, multiplier);
+                tCtx.fillStyle = getThemePattern(tCtx);
+                tCtx.fillRect(0, 0, canvas.width, canvas.height);
+                tCtx.scale(1/multiplier, 1/multiplier); 
+                
+                const img = new Image();
+                img.onload = () => {
+                    tCtx.drawImage(img, 0, 0, tempCanvas.width, tempCanvas.height);
+                    document.getElementById('save-img-result').src = tempCanvas.toDataURL('image/png', 1.0);
+                    document.getElementById('save-loading').classList.add('hidden'); 
+                };
+                img.src = fabricDataURL;
+            }, 100);
+        });
+
+        // --- 隐形复合渲染棚录制视频 (移除视角强制重置) ---
+        let mediaRecorder; let recordedChunks = [];
+        document.getElementById('btn-play-record').addEventListener('click', async () => {
+            if (drawHistory.length === 0) return showToast('先写点什么再录制吧~');
+            
+            // 【重要修改】：移除了这里原本的 canvas.setViewportTransform([1,0,0,1,0,0]);
+            // 现在会完全保留用户当前的缩放和移动视角，做到“所见即所得”
+            
+            drawer.classList.remove('open'); canvas.discardActiveObject(); dynamicPanel.classList.add('opacity-0');
+            topBar.classList.add('hide-for-screenshot'); bottomNav.classList.add('hide-for-screenshot');
+            const indicator = document.getElementById('recording-indicator'); indicator.style.display = 'block'; canvas.isDrawingMode = false;
+            
+            const objs = canvas.getObjects(); objs.forEach(o => o.set({ opacity: 0 })); canvas.renderAll();
+
+            let canRecord = false;
+            let isRecordingStream = true;
+            
+            try {
+                const sourceCanvas = document.getElementById('main-canvas');
+                const streamCanvas = document.createElement('canvas');
+                const dpr = window.devicePixelRatio || 1;
+                
+                streamCanvas.width = sourceCanvas.width; 
+                streamCanvas.height = sourceCanvas.height;
+                const streamCtx = streamCanvas.getContext('2d');
+                const bgPattern = getThemePattern(streamCtx);
+
+                function renderStreamFrame() {
+                    if (!isRecordingStream) return;
+                    streamCtx.save();
+                    streamCtx.scale(dpr, dpr);
+                    streamCtx.fillStyle = bgPattern;
+                    
+                    // 背景的偏移：如果你想让背景纸张也跟着移动，可以在这里计算 vpt 偏移
+                    // 但为了保持稳定，底纸通常保持不动，让字动
+                    streamCtx.fillRect(0, 0, streamCanvas.width / dpr, streamCanvas.height / dpr);
+                    streamCtx.restore();
+                    streamCtx.drawImage(sourceCanvas, 0, 0);
+                    requestAnimationFrame(renderStreamFrame);
+                }
+                renderStreamFrame();
+
+                const stream = streamCanvas.captureStream(30); 
+                let mimeType = '';
+                if (MediaRecorder.isTypeSupported('video/mp4')) mimeType = 'video/mp4'; else if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9')) mimeType = 'video/webm; codecs=vp9'; else if (MediaRecorder.isTypeSupported('video/webm')) mimeType = 'video/webm';
+                
+                if (mimeType) {
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType }); recordedChunks = [];
+                    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+                    mediaRecorder.onstop = () => {
+                        isRecordingStream = false; 
+                        const blob = new Blob(recordedChunks, { type: mimeType }); const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a'); a.href = url; const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'; a.download = `手帐高清录影_${Date.now()}.${ext}`; document.body.appendChild(a); a.click(); setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+                        topBar.classList.remove('hide-for-screenshot'); bottomNav.classList.remove('hide-for-screenshot'); indicator.style.display = 'none'; showToast(`超清视频合成完毕`);
+                    };
+                    mediaRecorder.start(); canRecord = true;
+                }
+            } catch (err) { 
+                isRecordingStream = false; topBar.classList.remove('hide-for-screenshot'); bottomNav.classList.remove('hide-for-screenshot'); indicator.style.display = 'none'; showToast("设备限制，为您极速播放效果"); 
+            }
+
+            const fastDrawDuration = drawHistory.length > 8 ? 120 : 300;
+            const fastPauseDuration = drawHistory.length > 8 ? 10 : 30;
+
+            for (let item of drawHistory) {
+                if (!canvas.getObjects().includes(item.obj)) continue;
+                if (item.type === 'path') {
+                    await new Promise(resolve => {
+                        item.obj.set({ opacity: 1 }); const len = 5000; 
+                        if (item.isHollow) {
+                            item.obj._objects.forEach(sub => {
+                                sub.set({ strokeDashArray: [len, len], strokeDashOffset: len });
+                                sub.animate('strokeDashOffset', 0, { duration: fastDrawDuration, onChange: canvas.renderAll.bind(canvas), onComplete: () => { sub.set({ strokeDashArray: null }); canvas.renderAll(); }, easing: fabric.util.ease.easeOutSine });
+                            });
+                            setTimeout(resolve, fastDrawDuration + fastPauseDuration);
+                        } else {
+                            item.obj.set({ strokeDashArray: [len, len], strokeDashOffset: len });
+                            item.obj.animate('strokeDashOffset', 0, { duration: fastDrawDuration, onChange: canvas.renderAll.bind(canvas), onComplete: () => { item.obj.set({ strokeDashArray: null }); canvas.renderAll(); setTimeout(resolve, fastPauseDuration); }, easing: fabric.util.ease.easeOutSine });
+                        }
+                    });
+                } else if (item.type === 'image') {
+                    await new Promise(resolve => {
+                        item.obj.set({ opacity: 0, scaleX: item.obj.scaleX*0.8, scaleY: item.obj.scaleY*0.8 }); item.obj.animate('opacity', 1, { duration: 100 });
+                        item.obj.animate('scaleX', item.obj.scaleX/0.8, { duration: 200, easing: fabric.util.ease.easeOutBack }); item.obj.animate('scaleY', item.obj.scaleY/0.8, { duration: 200, onChange: canvas.renderAll.bind(canvas), onComplete: () => setTimeout(resolve, 50), easing: fabric.util.ease.easeOutBack });
+                    });
+                }
+            }
+
+            if (canRecord && mediaRecorder && mediaRecorder.state !== 'inactive') { setTimeout(() => { mediaRecorder.stop(); }, 600); } 
+            else { topBar.classList.remove('hide-for-screenshot'); bottomNav.classList.remove('hide-for-screenshot'); indicator.style.display = 'none'; }
+        });
+    </script>
+</body>
+</html>
