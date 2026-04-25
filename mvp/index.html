@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0f0f10" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>手写 Live · MVP</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@900&family=ZCOOL+XiaoWei&family=Long+Cang&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="top-bar">
+      <div class="brand">手写 Live</div>
+      <div class="steps" id="step-dots" aria-label="进度">
+        <span class="dot active" data-step="0">1</span>
+        <span class="dot" data-step="1">2</span>
+        <span class="dot" data-step="2">3</span>
+        <span class="dot" data-step="3">4</span>
+      </div>
+    </header>
+
+    <p class="step-title" id="step-title">第 1 步 · 选照片</p>
+    <p class="step-hint" id="step-hint">用作成片最底层。可跳过，用纯色底。</p>
+
+    <div id="stage-wrap">
+      <canvas id="main"></canvas>
+    </div>
+
+    <!-- 第 1 步面板 -->
+    <div class="sheet" id="panel-0">
+      <label class="big-btn primary">
+        <input type="file" accept="image/*" id="input-photo" hidden />
+        从相册选照片
+      </label>
+      <button type="button" class="big-btn ghost" id="btn-skip-photo">跳过，用白底</button>
+    </div>
+
+    <!-- 第 2 步：Poster 模板 + 摆红框 -->
+    <div class="sheet hidden" id="panel-1">
+      <label class="tpl-field"
+        >分类
+        <select id="tpl-category" class="tpl-select">
+          <option value="all">全部</option>
+          <option value="square">方形</option>
+          <option value="vertical">竖排</option>
+          <option value="horizontal">横排</option>
+          <option value="custom">自定义</option>
+        </select>
+      </label>
+      <div class="tpl-list" id="tpl-list" role="listbox" aria-label="海报模板"></div>
+      <p class="inline-tip">选模板后单指拖动红框 · 双指缩放旋转</p>
+    </div>
+
+    <!-- 第 3 步：邪修 -->
+    <div class="sheet hidden" id="panel-2">
+      <div class="slot-row" id="slot-row"></div>
+      <input type="text" class="char-in" id="warp-char" maxlength="1" placeholder="一字" autocomplete="off" />
+      <button type="button" class="big-btn secondary" id="btn-open-warp">调邪修（田字格）</button>
+      <p class="mini">按圈编号切换槽位；至少完成第一个槽位。字会落在对应椭圆里。</p>
+    </div>
+
+    <!-- 第 4 步：写字 -->
+    <div class="sheet hidden" id="panel-3">
+      <div class="tool-row">
+        <button type="button" class="chip active" data-brush="pen">顺滑</button>
+        <button type="button" class="chip" data-brush="chubby">粗笔</button>
+        <button type="button" class="chip" data-brush="pencil">铅笔</button>
+      </div>
+      <div class="tool-row">
+        <label class="color-wrap"><input type="color" id="brush-color" value="#1a1a1a" /></label>
+        <input type="range" id="brush-size" min="2" max="36" value="10" />
+      </div>
+      <button type="button" class="big-btn ghost" id="btn-ref">
+        <span id="ref-icon">👁</span> 参考层：<span id="ref-label">开</span>
+      </button>
+      <button type="button" class="big-btn ghost" id="btn-undo">撤回一笔</button>
+    </div>
+
+    <!-- 底栏 -->
+    <footer class="bottom-bar">
+      <button type="button" class="nav-btn" id="btn-back">上一步</button>
+      <button type="button" class="nav-btn primary" id="btn-next">下一步</button>
+    </footer>
+
+    <div id="toast" class="toast" role="status"></div>
+  </div>
+
+  <!-- 邪修全屏 -->
+  <div id="warp-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-inner">
+      <div class="modal-head">
+        <span>田字格邪修</span>
+        <button type="button" class="icon-btn" id="warp-close" aria-label="关闭">✕</button>
+      </div>
+      <label class="warp-font-row"
+        >字体
+        <select id="warp-font" class="modal-select">
+          <option value="'Noto Serif SC', 'Songti SC', 'STSong', serif">宋 / 明</option>
+          <option value="'ZCOOL XiaoWei', 'KaiTi', 'STKaiti', serif">小薇 / 楷</option>
+          <option value="'Long Cang', cursive">手写</option>
+          <option value="'PingFang SC', 'STHeiti', sans-serif">黑体</option>
+        </select>
+      </label>
+      <p class="warp-hintline">粉点拖外框 · 蓝线/蓝点拖田字比例；双击角或轴可复位。</p>
+      <div class="warp-stage" id="warp-stage" touch-action="none">
+        <canvas id="warp-out" width="512" height="512" aria-label="邪修预览"></canvas>
+        <svg id="warp-overlay" class="warp-overlay" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+          <polygon class="warp-frame-line" id="warp-frame-poly" points="0,0 1000,0 1000,1000 0,1000" />
+          <line class="warp-axis-hitarea" id="warp-axis-v-hit" x1="500" y1="0" x2="500" y2="1000" />
+          <line class="warp-axis-hitarea" id="warp-axis-h-hit" x1="0" y1="500" x2="1000" y2="500" />
+          <line class="warp-axis-line" id="warp-axis-v" x1="500" y1="0" x2="500" y2="1000" />
+          <line class="warp-axis-line" id="warp-axis-h" x1="0" y1="500" x2="1000" y2="500" />
+          <circle class="warp-axis-handle" id="warp-axis-vx-handle" r="7" cx="500" cy="500" />
+          <circle class="warp-axis-handle" id="warp-axis-hy-handle" r="7" cx="500" cy="500" />
+          <circle class="warp-corner-handle" id="warp-corner-tl" r="10" cx="20" cy="20" data-corner="tl" />
+          <circle class="warp-corner-handle" id="warp-corner-tr" r="10" cx="980" cy="20" data-corner="tr" />
+          <circle class="warp-corner-handle" id="warp-corner-bl" r="10" cx="20" cy="980" data-corner="bl" />
+          <circle class="warp-corner-handle" id="warp-corner-br" r="10" cx="980" cy="980" data-corner="br" />
+        </svg>
+      </div>
+      <div class="warp-sliders">
+        <label>竖轴（左右挤，可与蓝线同调）<input type="range" id="warp-vx" min="8" max="92" value="50" /></label>
+        <label>横轴（上下挤，可与蓝线同调）<input type="range" id="warp-hy" min="8" max="92" value="50" /></label>
+      </div>
+      <div class="warp-presets">
+        <button type="button" data-p="rf">右肥</button>
+        <button type="button" data-p="us">上挤</button>
+        <button type="button" data-p="trap">倒梯形</button>
+        <button type="button" data-p="reset">重置</button>
+      </div>
+      <button type="button" class="big-btn primary full" id="warp-ok">用到红圈</button>
+    </div>
+  </div>
+
+  <!-- 导出中 -->
+  <div id="export-mask" class="mask hidden">
+    <div class="spinner"></div>
+    <p>正在合成视频…</p>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
