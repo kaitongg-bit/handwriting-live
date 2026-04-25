@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>字形邪修 · 田字格中线轴 + 4 角控制点</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@900&family=ZCOOL+XiaoWei&family=Long+Cang&display=swap" rel="stylesheet">
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; touch-action: none; user-select: none; }
+  body {
+    background: radial-gradient(ellipse at center, #1a1a1a 0%, #050505 80%);
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    padding: 14px 20px 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    flex: 0 0 auto;
+  }
+  header h1 {
+    font-size: 16px; font-weight: 700; letter-spacing: 0.5px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  header h1::before {
+    content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #ec4899; box-shadow: 0 0 12px #ec4899;
+  }
+  header p {
+    font-size: 11px; color: #888; margin-top: 4px; line-height: 1.5;
+  }
+  header p .pink { color: #ec4899; }
+  header p .blue { color: #63b3ed; }
+
+  main {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 12px; gap: 10px;
+    overflow: hidden;
+  }
+
+  .stage-wrap {
+    position: relative;
+    width: min(85vw, 80vh, 560px);
+    aspect-ratio: 1 / 1;
+    background: #0a0a0a;
+    border-radius: 12px;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 24px 64px rgba(0,0,0,0.6);
+    touch-action: none;
+  }
+
+  #char-canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    border-radius: 12px;
+  }
+
+  /* SVG 覆盖层：必须能命中子元素。父级 pointer-events:none 在部分 WebKit 下会导致
+     圆点/轴线全部点不到，表现为「怎么拖都没反应」。 */
+  #overlay {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    overflow: visible;
+    pointer-events: auto;
+  }
+
+  /* 4 个角控制点：粉色（外形邪修） */
+  .corner-handle {
+    fill: #ec4899;
+    stroke: #fff;
+    stroke-width: 2.5;
+    cursor: grab;
+    pointer-events: all;
+    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.6));
+    transition: r 0.1s ease;
+  }
+  .corner-handle:hover { fill: #f472b6; }
+  .corner-handle:active { cursor: grabbing; }
+
+  /* 2 个中线轴端点：蓝色（内部邪修） */
+  .axis-handle {
+    fill: #63b3ed;
+    stroke: #fff;
+    stroke-width: 2;
+    cursor: grab;
+    pointer-events: all;
+    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.6));
+  }
+  .axis-handle:active { cursor: grabbing; }
+
+  /* 外框（4 角连成的虚线） */
+  .frame-line {
+    stroke: rgba(236, 72, 153, 0.5);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    fill: none;
+    pointer-events: none;
+  }
+
+  /* 中线轴（蓝色虚线） */
+  .axis-line {
+    stroke: rgba(99, 179, 237, 0.7);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 4;
+    fill: none;
+    pointer-events: stroke;
+    cursor: grab;
+  }
+  .axis-line:hover { stroke: rgba(99, 179, 237, 1); stroke-width: 2.5; }
+  .axis-line:active { cursor: grabbing; }
+
+  /* 中线轴拖动热区（更宽，无视觉） */
+  .axis-hitarea {
+    stroke: transparent;
+    stroke-width: 40;
+    fill: none;
+    pointer-events: stroke;
+    cursor: grab;
+  }
+  .axis-hitarea:active { cursor: grabbing; }
+
+  .stage-wrap.grid-hidden #overlay { opacity: 0; pointer-events: none; }
+
+  /* 比例提示 */
+  .hint {
+    position: absolute;
+    background: rgba(0,0,0,0.85);
+    backdrop-filter: blur(6px);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 9px;
+    border-radius: 6px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+    white-space: nowrap;
+    z-index: 10;
+    border: 1px solid rgba(99, 179, 237, 0.4);
+  }
+  .hint.show { opacity: 1; }
+  .hint.pink { border-color: rgba(236, 72, 153, 0.5); }
+
+  /* 控制面板 */
+  .controls {
+    width: min(85vw, 560px);
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .control-row {
+    display: flex; align-items: center; gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .label-tiny {
+    font-size: 11px; color: #888;
+    min-width: 36px; flex: 0 0 auto;
+  }
+
+  .char-input {
+    flex: 1;
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #fff;
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-size: 18px;
+    font-weight: 700;
+    text-align: center;
+    outline: none;
+    min-width: 70px;
+    max-width: 110px;
+  }
+  .char-input:focus { border-color: rgba(99,179,237,0.6); }
+
+  .font-select {
+    flex: 1;
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #fff;
+    padding: 7px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    outline: none;
+    min-width: 100px;
+  }
+
+  .btn {
+    background: #1a1a1a;
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #fff;
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: #252525; border-color: rgba(255,255,255,0.2); }
+  .btn:active { transform: scale(0.96); }
+  .btn.primary { background: #ec4899; border-color: #ec4899; }
+  .btn.primary:hover { background: #db2777; }
+  .btn.preset { background: rgba(236, 72, 153, 0.1); border-color: rgba(236, 72, 153, 0.4); color: #ec4899; }
+  .btn.preset:hover { background: rgba(236, 72, 153, 0.2); }
+
+  .stats {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    font-size: 10px; color: #888;
+    padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);
+  }
+  .stat { display: flex; gap: 4px; align-items: center; }
+  .stat strong { color: #63b3ed; font-weight: 700; }
+  .stat.fps strong { color: #10b981; }
+
+  .pulse-hint {
+    position: absolute;
+    background: rgba(236, 72, 153, 0.15);
+    border: 1px solid rgba(236, 72, 153, 0.6);
+    color: #ec4899;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 100px;
+    top: 12px; left: 50%;
+    transform: translateX(-50%);
+    pointer-events: none;
+    animation: pulse 2.5s ease-in-out infinite;
+    white-space: nowrap;
+    z-index: 8;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.7; transform: translateX(-50%) scale(1); }
+    50% { opacity: 1; transform: translateX(-50%) scale(1.05); }
+  }
+  .pulse-hint.gone { display: none; }
+
+  @media (max-width: 480px) {
+    header { padding: 10px 14px 6px; }
+    header h1 { font-size: 14px; }
+    header p { font-size: 10px; }
+    main { padding: 10px; gap: 8px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>字形邪修 · 田字格 + 4 角控制点</h1>
+  <p>
+    拖 <span class="pink">● 粉色 4 角</span> 改外框（参考图 1）·
+    拖 <span class="blue">● 蓝色中线</span> 改疏密（参考图 2）：<strong>外框仍是方框时</strong>走与第一版相同的 <strong>4×drawImage</strong>（直线田字、无折痕）；<strong>四角拉斜后</strong>才用三角形 mesh。
+  </p>
+</header>
+
+<main>
+  <div class="stage-wrap" id="stage">
+    <canvas id="char-canvas" width="1024" height="1024"></canvas>
+
+    <!-- SVG 覆盖层 -->
+    <svg id="overlay" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+      <!-- 4 角虚线外框 -->
+      <polygon class="frame-line" id="frame-poly" points="" />
+
+      <!-- 中线轴线（先 hitarea，再可视）-->
+      <line class="axis-hitarea" id="axis-v-hit" />
+      <line class="axis-hitarea" id="axis-h-hit" />
+      <line class="axis-line" id="axis-v" />
+      <line class="axis-line" id="axis-h" />
+
+      <!-- 中线轴端点（4 个，在中线两端，可拖动以滑动比例） -->
+      <circle class="axis-handle" id="axis-vx-handle" r="7" />
+      <circle class="axis-handle" id="axis-hy-handle" r="7" />
+
+      <!-- 4 角控制点 -->
+      <circle class="corner-handle" id="corner-tl" r="10" data-corner="tl" />
+      <circle class="corner-handle" id="corner-tr" r="10" data-corner="tr" />
+      <circle class="corner-handle" id="corner-bl" r="10" data-corner="bl" />
+      <circle class="corner-handle" id="corner-br" r="10" data-corner="br" />
+    </svg>
+
+    <!-- 比例提示 -->
+    <div class="hint" id="hint"></div>
+
+    <div class="pulse-hint" id="pulse-hint">方框内：拖蓝线 = 第一版田字效果 · 粉角拉斜后才用高级变形</div>
+  </div>
+
+  <div class="controls">
+    <div class="control-row">
+      <span class="label-tiny">字</span>
+      <input type="text" class="char-input" id="char-input" value="邪"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+
+      <span class="label-tiny">字体</span>
+      <select class="font-select" id="font-select">
+        <option value="'Noto Serif SC', 'Songti SC', 'STSong', serif">邪修宋</option>
+        <option value="'ZCOOL XiaoWei', 'KaiTi', 'STKaiti', serif">小薇 / 楷</option>
+        <option value="'Long Cang', cursive">手写</option>
+        <option value="'PingFang SC', 'STHeiti', sans-serif">黑体</option>
+      </select>
+    </div>
+
+    <div class="control-row">
+      <span class="label-tiny">外框</span>
+      <button class="btn preset" data-preset="trapezoid-down">倒梯形</button>
+      <button class="btn preset" data-preset="trapezoid-up">梯形</button>
+      <button class="btn preset" data-preset="parallelogram">斜体</button>
+      <button class="btn preset" data-preset="perspective">透视</button>
+    </div>
+
+    <div class="control-row">
+      <span class="label-tiny">内部</span>
+      <button class="btn preset" data-preset="right-fat">右肥</button>
+      <button class="btn preset" data-preset="up-squeeze">上挤</button>
+      <button class="btn preset" data-preset="combo">组合·邪修</button>
+      <button class="btn" id="btn-reset">重置全部</button>
+      <button class="btn" id="btn-toggle-grid">隐藏控制点</button>
+      <button class="btn primary" id="btn-screenshot">导出 PNG</button>
+    </div>
+
+    <div class="stats">
+      <div class="stat">竖轴 vx: <strong id="stat-vx">50%</strong></div>
+      <div class="stat">横轴 hy: <strong id="stat-hy">50%</strong></div>
+      <div class="stat fps">帧率: <strong id="stat-fps">--</strong></div>
+      <div class="stat">渲染: <strong id="stat-rt">--</strong> ms</div>
+      <div class="stat">三角形: <strong id="stat-tri">8</strong></div>
+    </div>
+  </div>
+</main>
+
+<script>
+//=========================================================
+// 字形邪修 · 9 控制点 mesh warp
+//=========================================================
+//
+// 数据模型：
+//   corners[4]    四角点 {x, y} ∈ [0, 1]，归一化坐标
+//   vx, hy        中线轴比例 ∈ [0.15, 0.85]
+//
+// 推导出 9 个网格点（2x2 网格）：
+//   P_TL = corners.tl
+//   P_TR = corners.tr
+//   P_BL = corners.bl
+//   P_BR = corners.br
+//   P_T  = lerp(P_TL, P_TR, vx)        上边中点
+//   P_B  = lerp(P_BL, P_BR, vx)        下边中点
+//   P_L  = lerp(P_TL, P_BL, hy)        左边中点
+//   P_R  = lerp(P_TR, P_BR, hy)        右边中点
+//   P_C  = bilinear(corners, vx, hy)   中心点
+//
+// 4 个象限四边形：
+//   Q_TL = [P_TL, P_T, P_C, P_L]
+//   Q_TR = [P_T, P_TR, P_R, P_C]
+//   Q_BL = [P_L, P_C, P_B, P_BL]
+//   Q_BR = [P_C, P_R, P_BR, P_B]
+//
+// 渲染：每象限拆 2 三角形 → 8 三角形仿射变换
+//
+// 中线拖动：必须与「纯田字格 v1」一致 —— 用舞台归一化坐标 nx / ny，
+// 不要用「投影到斜边」：后者在方框下会把纵向移动也算进 vx，手感发飘、
+// 且 0.15~0.85 + 四角内缩 5% 会明显削弱「左挤右肥」的视觉冲击。
+//=========================================================
+
+/** 外框四角默认离画布边的留白（越小，内部中线效果越接近 v1） */
+const FRAME_MARGIN = 0.01;
+/** 竖轴 vx / 横轴 hy 的可调范围（放宽后更容易拉出「邪修」感） */
+const AXIS_LO = 0.08;
+const AXIS_HI = 0.92;
+
+const stage = document.getElementById('stage');
+const canvas = document.getElementById('char-canvas');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+const charInput = document.getElementById('char-input');
+const fontSelect = document.getElementById('font-select');
+const hint = document.getElementById('hint');
+const pulseHint = document.getElementById('pulse-hint');
+const statVx = document.getElementById('stat-vx');
+const statHy = document.getElementById('stat-hy');
+const statFps = document.getElementById('stat-fps');
+const statRt = document.getElementById('stat-rt');
+
+// SVG 元素
+const framePoly = document.getElementById('frame-poly');
+const axisV = document.getElementById('axis-v');
+const axisH = document.getElementById('axis-h');
+const axisVHit = document.getElementById('axis-v-hit');
+const axisHHit = document.getElementById('axis-h-hit');
+const axisVxHandle = document.getElementById('axis-vx-handle');
+const axisHyHandle = document.getElementById('axis-hy-handle');
+const cornerTL = document.getElementById('corner-tl');
+const cornerTR = document.getElementById('corner-tr');
+const cornerBL = document.getElementById('corner-bl');
+const cornerBR = document.getElementById('corner-br');
+
+const SVG_VB = 1000; // viewBox size
+
+// === 状态 === //
+const state = {
+  corners: {
+    tl: { x: FRAME_MARGIN, y: FRAME_MARGIN },
+    tr: { x: 1 - FRAME_MARGIN, y: FRAME_MARGIN },
+    bl: { x: FRAME_MARGIN, y: 1 - FRAME_MARGIN },
+    br: { x: 1 - FRAME_MARGIN, y: 1 - FRAME_MARGIN },
+  },
+  vx: 0.5,
+  hy: 0.5,
+};
+
+// === 源 canvas（标准方块字位图） === //
+const srcCanvas = document.createElement('canvas');
+const SRC = 1024;
+srcCanvas.width = SRC; srcCanvas.height = SRC;
+const srcCtx = srcCanvas.getContext('2d');
+
+let lastRenderMs = 0;
+
+function renderSource(char, fontFamily) {
+  srcCtx.clearRect(0, 0, SRC, SRC);
+  const grad = srcCtx.createLinearGradient(0, 0, 0, SRC);
+  grad.addColorStop(0, '#f472b6');
+  grad.addColorStop(1, '#ec4899');
+  srcCtx.fillStyle = grad;
+  srcCtx.font = `900 ${SRC * 0.92}px ${fontFamily}`;
+  srcCtx.textAlign = 'center';
+  srcCtx.textBaseline = 'middle';
+  srcCtx.fillText(char, SRC / 2, SRC * 0.52);
+}
+
+// === 几何工具 === //
+function lerp(a, b, t) {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+function bilinear(c, vx, hy) {
+  // 双线性插值得中心点
+  const top = lerp(c.tl, c.tr, vx);
+  const bot = lerp(c.bl, c.br, vx);
+  return lerp(top, bot, hy);
+}
+
+/** 外框是否为轴对齐矩形（未邪修四角时）。此时必须用 4×drawImage，不能用三角形拼：
+ *  三角形仿射在矩形目标上会在对角线留下折痕，笔画会像「弯了一下」且和第一版田字格观感不一致。 */
+/** eps 略大：避免手指微调角点后「差一点不是矩形」就退回 mesh、字又变弯。 */
+function isAxisAlignedRect(c, eps = 0.014) {
+  return (
+    Math.abs(c.tl.y - c.tr.y) < eps &&
+    Math.abs(c.bl.y - c.br.y) < eps &&
+    Math.abs(c.tl.x - c.bl.x) < eps &&
+    Math.abs(c.tr.x - c.br.x) < eps
+  );
+}
+
+// 把归一化坐标 (0..1) 转 canvas 像素
+function toCanvasPx(p) {
+  return { x: p.x * canvas.width, y: p.y * canvas.height };
+}
+// 把归一化坐标 (0..1) 转 SVG viewBox 坐标
+function toSvgVb(p) {
+  return { x: p.x * SVG_VB, y: p.y * SVG_VB };
+}
+
+// === 仿射变换矩阵：3 源点 → 3 目标点 === //
+//
+// 求 [a c e; b d f; 0 0 1]，使得：
+//   a*sx_i + c*sy_i + e = dx_i
+//   b*sx_i + d*sy_i + f = dy_i  (i = 0,1,2)
+// 用 Cramer 法则解 2 个 3×3 线性方程
+function getAffine(s0, s1, s2, d0, d1, d2) {
+  const x0 = s0.x, y0 = s0.y;
+  const x1 = s1.x, y1 = s1.y;
+  const x2 = s2.x, y2 = s2.y;
+
+  const det = (x0 * (y1 - y2) - y0 * (x1 - x2) + (x1 * y2 - x2 * y1));
+  if (Math.abs(det) < 1e-9) return null;
+  const invDet = 1 / det;
+
+  // 解 [a c e]
+  const a = ((d0.x - d2.x) * (y1 - y2) - (d1.x - d2.x) * (y0 - y2)) * invDet;
+  const c = ((d1.x - d2.x) * (x0 - x2) - (d0.x - d2.x) * (x1 - x2)) * invDet;
+  const e = d0.x - a * x0 - c * y0;
+
+  const b = ((d0.y - d2.y) * (y1 - y2) - (d1.y - d2.y) * (y0 - y2)) * invDet;
+  const d = ((d1.y - d2.y) * (x0 - x2) - (d0.y - d2.y) * (x1 - x2)) * invDet;
+  const f = d0.y - b * x0 - d * y0;
+
+  return { a, b, c, d, e, f };
+}
+
+// 画一个三角形：源三角形 (s0,s1,s2) 像素 → 目标 (d0,d1,d2) 像素
+function drawTri(srcCanvas, s0, s1, s2, d0, d1, d2) {
+  const m = getAffine(s0, s1, s2, d0, d1, d2);
+  if (!m) return;
+
+  ctx.save();
+  ctx.beginPath();
+  // 注意：clip 路径用未变换的目标坐标
+  // 但因为我们要用 setTransform(m) 后画 srcCanvas，所以 clip 也要在 setTransform 之后用源坐标
+  // 简单的等价方式：clip 用目标坐标，drawImage 用 setTransform 后的 (0,0) 全图
+  ctx.moveTo(d0.x, d0.y);
+  ctx.lineTo(d1.x, d1.y);
+  ctx.lineTo(d2.x, d2.y);
+  ctx.closePath();
+  // 微微膨胀 clip 区避免缝隙（伸展 0.5px）
+  ctx.clip();
+  ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f);
+  ctx.drawImage(srcCanvas, 0, 0);
+  ctx.restore();
+}
+
+/**
+ * 轴对齐矩形外框 + vx/hy：与第一版田字格 demo 完全相同的 4×drawImage。
+ *
+ * 关键：源图永远在 50%/50% 处切（字本身居中），只有目标矩形按 vx/hy 改大小。
+ * —— 这才是「挤」的来源：源左半 50% 宽塞进目标 30% 宽 = 收缩 60%。
+ *    之前把源也按 vx 切，相当于 30%源→30%目标，1:1 不缩放，自然看不出效果。
+ */
+function renderAxisAlignedRectWarp(c, vx, hy) {
+  const W = canvas.width;
+  const H = canvas.height;
+  const xL = c.tl.x * W;
+  const xR = c.tr.x * W;
+  const yT = c.tl.y * H;
+  const yB = c.bl.y * H;
+  const xSplit = xL + vx * (xR - xL);
+  const ySplit = yT + hy * (yB - yT);
+
+  const halfSw = SRC / 2;  // 源永远从中点切 —— 这是 v1 关键
+  const halfSh = SRC / 2;
+  const overlap = 1;
+
+  ctx.drawImage(srcCanvas, 0, 0, halfSw, halfSh,
+    xL, yT, xSplit - xL + overlap, ySplit - yT + overlap);
+  ctx.drawImage(srcCanvas, halfSw, 0, halfSw, halfSh,
+    xSplit, yT, xR - xSplit, ySplit - yT + overlap);
+  ctx.drawImage(srcCanvas, 0, halfSh, halfSw, halfSh,
+    xL, ySplit, xSplit - xL + overlap, yB - ySplit);
+  ctx.drawImage(srcCanvas, halfSw, halfSh, halfSw, halfSh,
+    xSplit, ySplit, xR - xSplit, yB - ySplit);
+}
+
+// === 主渲染 === //
+function renderWarped() {
+  const t0 = performance.now();
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const c = state.corners;
+  const vx = state.vx;
+  const hy = state.hy;
+
+  // 9 个网格点（归一化）— 中线 UI 与斜四边形 mesh 共用
+  const P_TL = c.tl;
+  const P_TR = c.tr;
+  const P_BL = c.bl;
+  const P_BR = c.br;
+  const P_T  = lerp(P_TL, P_TR, vx);
+  const P_B  = lerp(P_BL, P_BR, vx);
+  const P_L  = lerp(P_TL, P_BL, hy);
+  const P_R  = lerp(P_TR, P_BR, hy);
+  const P_C  = bilinear(c, vx, hy);
+
+  // 转为 canvas 像素
+  const dTL = toCanvasPx(P_TL);
+  const dTR = toCanvasPx(P_TR);
+  const dBL = toCanvasPx(P_BL);
+  const dBR = toCanvasPx(P_BR);
+  const dT  = toCanvasPx(P_T);
+  const dB  = toCanvasPx(P_B);
+  const dL  = toCanvasPx(P_L);
+  const dR  = toCanvasPx(P_R);
+  const dC  = toCanvasPx(P_C);
+
+  // 源 9 个网格点：源永远在 50%/50% 切（同 v1），不要随 vx/hy 变 —— 否则就不会有「挤」的效果。
+  const sw = SRC, sh = SRC;
+  const sHalfW = sw / 2, sHalfH = sh / 2;
+  const sTL = { x: 0,      y: 0      };
+  const sTR = { x: sw,     y: 0      };
+  const sBL = { x: 0,      y: sh     };
+  const sBR = { x: sw,     y: sh     };
+  const sT  = { x: sHalfW, y: 0      };
+  const sB  = { x: sHalfW, y: sh     };
+  const sL  = { x: 0,      y: sHalfH };
+  const sR  = { x: sw,     y: sHalfH };
+  const sC  = { x: sHalfW, y: sHalfH };
+
+  if (isAxisAlignedRect(c)) {
+    renderAxisAlignedRectWarp(c, vx, hy);
+  } else {
+    // 4 象限 × 2 三角形 = 8 个 drawTri（仅非矩形外框）
+    drawTri(srcCanvas, sTL, sT, sC, dTL, dT, dC);
+    drawTri(srcCanvas, sTL, sC, sL, dTL, dC, dL);
+    drawTri(srcCanvas, sT, sTR, sR, dT, dTR, dR);
+    drawTri(srcCanvas, sT, sR, sC, dT, dR, dC);
+    drawTri(srcCanvas, sL, sC, sB, dL, dC, dB);
+    drawTri(srcCanvas, sL, sB, sBL, dL, dB, dBL);
+    drawTri(srcCanvas, sC, sR, sBR, dC, dR, dBR);
+    drawTri(srcCanvas, sC, sBR, sB, dC, dBR, dB);
+  }
+
+  lastRenderMs = performance.now() - t0;
+  statRt.textContent = lastRenderMs.toFixed(2);
+
+  // 同步 UI 控件位置（用 SVG 坐标）
+  syncOverlay(P_TL, P_TR, P_BL, P_BR, P_T, P_B, P_L, P_R);
+
+  statVx.textContent = (vx * 100).toFixed(0) + '%';
+  statHy.textContent = (hy * 100).toFixed(0) + '%';
+}
+
+function syncOverlay(P_TL, P_TR, P_BL, P_BR, P_T, P_B, P_L, P_R) {
+  const tl = toSvgVb(P_TL);
+  const tr = toSvgVb(P_TR);
+  const bl = toSvgVb(P_BL);
+  const br = toSvgVb(P_BR);
+  const t  = toSvgVb(P_T);
+  const b  = toSvgVb(P_B);
+  const l  = toSvgVb(P_L);
+  const r  = toSvgVb(P_R);
+
+  framePoly.setAttribute('points', `${tl.x},${tl.y} ${tr.x},${tr.y} ${br.x},${br.y} ${bl.x},${bl.y}`);
+
+  axisV.setAttribute('x1', t.x); axisV.setAttribute('y1', t.y);
+  axisV.setAttribute('x2', b.x); axisV.setAttribute('y2', b.y);
+  axisVHit.setAttribute('x1', t.x); axisVHit.setAttribute('y1', t.y);
+  axisVHit.setAttribute('x2', b.x); axisVHit.setAttribute('y2', b.y);
+
+  axisH.setAttribute('x1', l.x); axisH.setAttribute('y1', l.y);
+  axisH.setAttribute('x2', r.x); axisH.setAttribute('y2', r.y);
+  axisHHit.setAttribute('x1', l.x); axisHHit.setAttribute('y1', l.y);
+  axisHHit.setAttribute('x2', r.x); axisHHit.setAttribute('y2', r.y);
+
+  // 中线轴端点把手放在中线中点（视觉上能拖动比例）
+  const tmid = lerp(P_T, P_B, 0.5);
+  const lmid = lerp(P_L, P_R, 0.5);
+  const tmidVb = toSvgVb(tmid);
+  const lmidVb = toSvgVb(lmid);
+  axisVxHandle.setAttribute('cx', tmidVb.x); axisVxHandle.setAttribute('cy', tmidVb.y);
+  axisHyHandle.setAttribute('cx', lmidVb.x); axisHyHandle.setAttribute('cy', lmidVb.y);
+
+  cornerTL.setAttribute('cx', tl.x); cornerTL.setAttribute('cy', tl.y);
+  cornerTR.setAttribute('cx', tr.x); cornerTR.setAttribute('cy', tr.y);
+  cornerBL.setAttribute('cx', bl.x); cornerBL.setAttribute('cy', bl.y);
+  cornerBR.setAttribute('cx', br.x); cornerBR.setAttribute('cy', br.y);
+}
+
+// === 渲染调度 === //
+let needsRender = true;
+function requestRender() { needsRender = true; }
+
+let fpsLastTs = performance.now(), fpsFrames = 0;
+function tick() {
+  if (needsRender) {
+    renderWarped();
+    needsRender = false;
+  }
+  fpsFrames++;
+  const now = performance.now();
+  if (now - fpsLastTs >= 1000) {
+    statFps.textContent = (fpsFrames * 1000 / (now - fpsLastTs)).toFixed(0);
+    fpsLastTs = now; fpsFrames = 0;
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// === 拖动交互 === //
+function getPoint(e) {
+  if (e.touches && e.touches.length) {
+    return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  }
+  return { x: e.clientX, y: e.clientY };
+}
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function clientToNorm(clientX, clientY) {
+  const r = stage.getBoundingClientRect();
+  return {
+    x: (clientX - r.left) / r.width,
+    y: (clientY - r.top) / r.height,
+  };
+}
+
+// 拖动 4 角控制点
+function bindCornerDrag(elem, key) {
+  let dragging = false;
+  function onStart(e) {
+    e.preventDefault(); e.stopPropagation();
+    dragging = true;
+    pulseHint.classList.add('gone');
+  }
+  function onMove(e) {
+    if (!dragging) return;
+    e.preventDefault();
+    const p = getPoint(e);
+    const n = clientToNorm(p.x, p.y);
+    state.corners[key] = {
+      x: clamp(n.x, -0.05, 1.05),  // 允许略微出框
+      y: clamp(n.y, -0.05, 1.05),
+    };
+    requestRender();
+    showCornerHint(key, n);
+  }
+  function onEnd() {
+    dragging = false;
+    setTimeout(() => hint.classList.remove('show'), 600);
+  }
+  elem.addEventListener('mousedown', onStart);
+  elem.addEventListener('touchstart', onStart, { passive: false });
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('touchmove', onMove, { passive: false });
+  window.addEventListener('mouseup', onEnd);
+  window.addEventListener('touchend', onEnd);
+
+  elem.addEventListener('dblclick', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    state.corners[key] = defaultCorner(key);
+    requestRender();
+  });
+}
+
+function defaultCorner(key) {
+  const m = FRAME_MARGIN;
+  return {
+    tl: { x: m, y: m },
+    tr: { x: 1 - m, y: m },
+    bl: { x: m, y: 1 - m },
+    br: { x: 1 - m, y: 1 - m },
+  }[key];
+}
+
+bindCornerDrag(cornerTL, 'tl');
+bindCornerDrag(cornerTR, 'tr');
+bindCornerDrag(cornerBL, 'bl');
+bindCornerDrag(cornerBR, 'br');
+
+// 拖动中线轴：与「纯田字格 v1」同一映射 —— 手指在舞台上的归一化 x / y 直接驱动 vx / hy。
+// （斜四边形时竖线仍按 vx 在上下边上的参数位置摆放，与第一版 demo 一致。）
+function bindAxisDrag(axisName, ...elems) {
+  let dragging = false;
+  function onStart(e) {
+    e.preventDefault(); e.stopPropagation();
+    dragging = true;
+    pulseHint.classList.add('gone');
+  }
+  function onMove(e) {
+    if (!dragging) return;
+    e.preventDefault();
+    const p = getPoint(e);
+    const n = clientToNorm(p.x, p.y);
+
+    if (axisName === 'v') {
+      state.vx = clamp(n.x, AXIS_LO, AXIS_HI);
+    } else {
+      state.hy = clamp(n.y, AXIS_LO, AXIS_HI);
+    }
+
+    requestRender();
+    showAxisHint(axisName);
+  }
+  function onEnd() {
+    dragging = false;
+    setTimeout(() => hint.classList.remove('show'), 600);
+  }
+
+  elems.forEach(elem => {
+    elem.addEventListener('mousedown', onStart);
+    elem.addEventListener('touchstart', onStart, { passive: false });
+
+    elem.addEventListener('dblclick', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (axisName === 'v') state.vx = 0.5; else state.hy = 0.5;
+      requestRender();
+    });
+  });
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('touchmove', onMove, { passive: false });
+  window.addEventListener('mouseup', onEnd);
+  window.addEventListener('touchend', onEnd);
+}
+
+bindAxisDrag('v', axisV, axisVHit, axisVxHandle);
+bindAxisDrag('h', axisH, axisHHit, axisHyHandle);
+
+// === 提示文案 === //
+function showCornerHint(key, n) {
+  const r = stage.getBoundingClientRect();
+  hint.textContent = `${key.toUpperCase()} (${(n.x * 100).toFixed(0)}, ${(n.y * 100).toFixed(0)})`;
+  hint.style.left = (n.x * 100) + '%';
+  hint.style.top = (n.y * 100) + '%';
+  hint.style.transform = 'translate(-50%, -140%)';
+  hint.classList.add('show');
+  hint.classList.add('pink');
+}
+function showAxisHint(axisName) {
+  hint.classList.remove('pink');
+  if (axisName === 'v') {
+    const left = (state.vx * 100).toFixed(0);
+    const right = (100 - state.vx * 100).toFixed(0);
+    hint.textContent = `左 ${left}% / 右 ${right}%`;
+  } else {
+    const top = (state.hy * 100).toFixed(0);
+    const bottom = (100 - state.hy * 100).toFixed(0);
+    hint.textContent = `上 ${top}% / 下 ${bottom}%`;
+  }
+  hint.style.left = '50%';
+  hint.style.top = '8px';
+  hint.style.transform = 'translateX(-50%)';
+  hint.classList.add('show');
+}
+
+// === 控件 === //
+let composing = false;
+charInput.addEventListener('compositionstart', () => { composing = true; });
+charInput.addEventListener('compositionend', (e) => {
+  composing = false;
+  const v = (e.target.value || '邪');
+  charInput.value = Array.from(v).slice(-1).join('') || '邪';
+  renderSource(charInput.value, fontSelect.value);
+  requestRender();
+});
+charInput.addEventListener('input', () => {
+  if (composing) return;
+  const v = charInput.value || '邪';
+  const ch = Array.from(v).slice(-1).join('') || '邪';
+  if (charInput.value !== ch) charInput.value = ch;
+  renderSource(charInput.value, fontSelect.value);
+  requestRender();
+});
+charInput.addEventListener('blur', () => {
+  if (!charInput.value) {
+    charInput.value = '邪';
+    renderSource(charInput.value, fontSelect.value);
+    requestRender();
+  }
+});
+
+fontSelect.addEventListener('change', () => {
+  renderSource(charInput.value, fontSelect.value);
+  requestRender();
+});
+
+document.getElementById('btn-reset').addEventListener('click', () => {
+  state.corners.tl = defaultCorner('tl');
+  state.corners.tr = defaultCorner('tr');
+  state.corners.bl = defaultCorner('bl');
+  state.corners.br = defaultCorner('br');
+  state.vx = 0.5;
+  state.hy = 0.5;
+  requestRender();
+});
+
+document.getElementById('btn-toggle-grid').addEventListener('click', (e) => {
+  stage.classList.toggle('grid-hidden');
+  e.target.textContent = stage.classList.contains('grid-hidden') ? '显示控制点' : '隐藏控制点';
+});
+
+document.getElementById('btn-screenshot').addEventListener('click', () => {
+  const wasHidden = stage.classList.contains('grid-hidden');
+  if (!wasHidden) stage.classList.add('grid-hidden');
+
+  // 等待一帧让 UI 隐藏后再导出
+  requestAnimationFrame(() => {
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = `邪修字_${charInput.value}_${Date.now()}.png`;
+    a.click();
+    if (!wasHidden) setTimeout(() => stage.classList.remove('grid-hidden'), 400);
+  });
+});
+
+// === 预设 === //
+const presets = {
+  // 外框预设
+  'trapezoid-down': {
+    // 倒梯形：上窄下宽
+    corners: {
+      tl: { x: 0.20, y: 0.05 },
+      tr: { x: 0.80, y: 0.05 },
+      bl: { x: 0.02, y: 0.95 },
+      br: { x: 0.98, y: 0.95 },
+    },
+  },
+  'trapezoid-up': {
+    // 正梯形：上宽下窄
+    corners: {
+      tl: { x: 0.02, y: 0.05 },
+      tr: { x: 0.98, y: 0.05 },
+      bl: { x: 0.20, y: 0.95 },
+      br: { x: 0.80, y: 0.95 },
+    },
+  },
+  'parallelogram': {
+    // 斜体：左下右上偏移
+    corners: {
+      tl: { x: 0.20, y: 0.05 },
+      tr: { x: 1.00, y: 0.05 },
+      bl: { x: 0.00, y: 0.95 },
+      br: { x: 0.80, y: 0.95 },
+    },
+  },
+  'perspective': {
+    // 透视：右侧近、左侧远
+    corners: {
+      tl: { x: 0.10, y: 0.20 },
+      tr: { x: 0.95, y: 0.05 },
+      bl: { x: 0.10, y: 0.80 },
+      br: { x: 0.95, y: 0.95 },
+    },
+  },
+  // 内部预设
+  'right-fat': { vx: 0.30, hy: 0.50 },
+  'up-squeeze': { vx: 0.50, hy: 0.30 },
+  // 组合：参考图 1+2 的最终邪修效果
+  'combo': {
+    corners: {
+      tl: { x: 0.18, y: 0.08 },
+      tr: { x: 0.92, y: 0.05 },
+      bl: { x: 0.05, y: 0.95 },
+      br: { x: 0.95, y: 0.92 },
+    },
+    vx: 0.32,
+    hy: 0.48,
+  },
+};
+
+document.querySelectorAll('[data-preset]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const preset = presets[btn.dataset.preset];
+    if (!preset) return;
+    if (preset.corners) Object.assign(state.corners, preset.corners);
+    if (preset.vx !== undefined) state.vx = preset.vx;
+    if (preset.hy !== undefined) state.hy = preset.hy;
+    requestRender();
+  });
+});
+
+// === 启动 === //
+function init() {
+  // 先同步画一帧，避免 fonts.ready 卡住时整页空白
+  renderSource(charInput.value, fontSelect.value);
+  requestRender();
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => {
+      renderSource(charInput.value, fontSelect.value);
+      requestRender();
+    });
+  }
+}
+init();
+
+document.addEventListener('gesturestart', e => e.preventDefault());
+</script>
+
+</body>
+</html>
