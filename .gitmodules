@@ -1,0 +1,3 @@
+[submodule "brain/kitaPM"]
+	path = brain/kitaPM
+	url = https://github.com/kaitongg-bit/kitaPM.git
