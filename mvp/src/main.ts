@@ -20,6 +20,8 @@ import {
   loadImageForSlot,
   circledSlotLabel,
 } from './posterTemplateFabric';
+import { BRUSHES, applyBrush, postProcessPath, createNoisePattern } from './brushes';
+import type { BrushId } from './brushes';
 
 let step = 0;
 let canvas: fabric.Canvas;
@@ -29,8 +31,24 @@ let selectedPosterTemplate = POSTER_TEMPLATES[0];
 let placement = defaultPlacementForTemplate(selectedPosterTemplate);
 let slotUrls: (string | null)[] = [];
 let refVisible = true;
-const drawHistory: fabric.Path[] = [];
+/** 手写笔迹（含中空组等 fabric 对象） */
+const drawHistory: fabric.Object[] = [];
 let currentSlot = 0;
+/** 槽位参考字 fabric.Image，与 slotUrls 同索引；从 templateGroup 解引用便于交互配置 */
+let slotFabricImages: (fabric.Image | null)[] = [];
+/** 第 3 步（面板）：poster＝拖整张模板；slot＝单独缩放/平移圈内参考字图 */
+let step2CanvasMode: 'poster' | 'slot' = 'poster';
+/** 第 4 步：选中笔画做缩放旋转（非节点级编辑） */
+let pathEditMode = false;
+/** 大字描写弹层打开中 */
+let traceModalOpen = false;
+let traceCanvas: fabric.Canvas | null = null;
+/** 大字描写弹层里与主槽位同步的淡色参考图 */
+let traceGuideImage: fabric.Image | null = null;
+const pendingTracePaths: fabric.Object[] = [];
+/** 有邪修图的槽位索引顺序 */
+let traceSlotOrder: number[] = [];
+let traceCursor = 0;
 
 const warpState = {
   corners: defaultCorners(),
@@ -58,6 +76,12 @@ function toast(msg: string) {
 
 function setStep(n: number) {
   step = Math.max(0, Math.min(3, n));
+  if (step !== 3) {
+    pathEditMode = false;
+  }
+  if (n === 2) {
+    step2CanvasMode = 'poster';
+  }
   document.querySelectorAll('.steps .dot').forEach((d, i) => {
     d.classList.toggle('active', i === step);
     d.classList.toggle('done', i < step);
@@ -68,14 +92,14 @@ function setStep(n: number) {
   const titles = [
     '第 1 步 · 选照片',
     '第 2 步 · 摆红框',
-    '第 3 步 · 邪修字',
-    '第 4 步 · 描字与导出',
+    '第 3 步 · 参考字与田字格',
+    '第 4 步 · 写字与导出',
   ];
   const hints = [
-    '用作成片最底层。可跳过，用浅色底。',
-    '选分类与模板；红框与椭圆位置与 Poster 一致。拖动到要写字的区域。',
-    '按槽位切换圆圈，输入一字后调邪修；字会落在该椭圆圆心附近。',
-    '打开参考层可看见浅粉字与红圈；写完点「导出视频」。',
+    '可跳过，用浅色底。',
+    '拖动整张红框到画面里你想写字的位置。',
+    '生成参考字；点「调参考字」在圈内单独放缩、平移。',
+    '只写字。参考布局请在第 3 步定好。',
   ];
   el('step-title').textContent = titles[step];
   el('step-hint').textContent = hints[step];
@@ -98,22 +122,174 @@ function resizeCanvas() {
   const r = wrap.getBoundingClientRect();
   canvas.setDimensions({ width: Math.max(200, r.width), height: Math.max(200, r.height) });
   canvas.renderAll();
+  if (traceModalOpen && traceCanvas) {
+    syncTraceCanvasSize();
+    traceCanvas.renderAll();
+  }
+}
+
+function syncStep2Coach() {
+  const coach = document.getElementById('step2-coach');
+  const btnP = document.getElementById('btn-step2-poster');
+  const btnS = document.getElementById('btn-step2-slot');
+  if (btnP && btnS) {
+    btnP.classList.toggle('active', step2CanvasMode === 'poster');
+    btnS.classList.toggle('active', step2CanvasMode === 'slot');
+  }
+  if (!coach) return;
+  if (step !== 2) {
+    coach.textContent = '';
+    return;
+  }
+  coach.textContent =
+    step2CanvasMode === 'poster'
+      ? '拖动、缩放、旋转整张红框。'
+      : '点圈里的字图：拖中间移动，拖角缩放；双击字图重开田字格。';
+}
+
+function syncStep4Coach() {
+  /** 文案降为 toast/标题副标题，避免再占面板高度 */
+  const hint = document.getElementById('step-hint');
+  if (step !== 3 || !hint) return;
+  if (traceModalOpen) return;
+  hint.textContent = pathEditMode
+    ? '笔画模式：点选已写的笔迹，拖控制点调整。再点「笔画」恢复书写。'
+    : '本步只写字。参考布局请在第 3 步定好。';
 }
 
 function applyStepMode() {
-  canvas.selection = step === 1 || step === 2;
-  canvas.isDrawingMode = step === 3;
-  if (step === 3) updateBrush();
+  const pathEdit = step === 3 && pathEditMode && !traceModalOpen;
+  canvas.selection = step === 1 || step === 2 || pathEdit;
+  canvas.isDrawingMode = step === 3 && !pathEditMode && !traceModalOpen;
+  if (step === 3 && canvas.isDrawingMode) updateBrush();
+  /** 在 step 2 + slot 模式下，把字图从 templateGroup 取出来；其他时候放回 group。
+   *  这样独立 image 能被 fabric 单独选中、拖、缩。*/
+  if (step === 2 && step2CanvasMode === 'slot') detachSlotImagesFromGroup();
+  else attachSlotImagesToGroup();
   if (templateGroup) {
-    templateGroup.selectable = step === 1 || step === 2;
-    templateGroup.evented = step === 1 || step === 2;
+    if (step <= 1) {
+      const movePoster = step === 1;
+      templateGroup.evented = movePoster;
+      templateGroup.selectable = movePoster;
+    } else if (step === 2) {
+      const movePoster = step2CanvasMode === 'poster';
+      templateGroup.evented = movePoster;
+      templateGroup.selectable = movePoster;
+    } else {
+      templateGroup.evented = false;
+      templateGroup.selectable = false;
+    }
   }
+  applySlotImagesInteraction();
+  applyPathObjectsInteraction();
+  const pathBtn = el('btn-path-edit');
+  if (pathBtn) pathBtn.classList.toggle('active', pathEdit);
+  if (canvas) {
+    if (step === 2 && step2CanvasMode === 'slot') {
+      canvas.set({ cornerSize: 16, touchCornerSize: 28 });
+    } else if (step === 3 && pathEditMode) {
+      canvas.set({ cornerSize: 16, touchCornerSize: 28 });
+    } else {
+      canvas.set({ cornerSize: 12, touchCornerSize: 20 });
+    }
+  }
+  syncStep2Coach();
+  syncStep4Coach();
   // 第 1 步不画画：必须关掉上层 canvas 命中，否则会挡住底部「下一步」
   const pe = step === 0 ? 'none' : 'auto';
   if (canvas.upperCanvasEl) (canvas.upperCanvasEl as HTMLCanvasElement).style.pointerEvents = pe;
   if (canvas.lowerCanvasEl) (canvas.lowerCanvasEl as HTMLCanvasElement).style.pointerEvents = pe;
   applyRefOpacity();
   canvas.renderAll();
+}
+
+function applyPathObjectsInteraction() {
+  const allow = step === 3 && pathEditMode && !traceModalOpen;
+  drawHistory.forEach((obj) => {
+    if (!canvas.getObjects().includes(obj)) return;
+    obj.set({ selectable: allow, evented: true });
+  });
+}
+
+function applySlotImagesInteraction() {
+  const allow = step === 2 && step2CanvasMode === 'slot';
+  slotFabricImages.forEach((img) => {
+    if (!img) return;
+    img.set({
+      selectable: allow,
+      evented: allow,
+      hasControls: allow,
+      hasBorders: allow,
+      borderColor: '#0a84ff',
+      cornerColor: '#0a84ff',
+      lockMovementX: !allow,
+      lockMovementY: !allow,
+      /** 整块位图区域可点（含透明像素），手机更好点中 */
+      perPixelTargetFind: false,
+    });
+    img.setControlsVisibility({ mtr: false });
+  });
+}
+
+/** 把当前在 canvas 顶层的字图加回 templateGroup，以便整组联动平移/缩放/旋转 */
+function attachSlotImagesToGroup() {
+  if (!templateGroup) return;
+  let changed = false;
+  slotFabricImages.forEach((img) => {
+    if (!img) return;
+    if (templateGroup!.contains(img)) return;
+    if (canvas.getObjects().includes(img)) {
+      canvas.remove(img);
+    }
+    /** addWithUpdate 会把世界坐标转换为 group 局部坐标，保持视觉位置 */
+    templateGroup!.addWithUpdate(img);
+    changed = true;
+  });
+  if (changed) {
+    templateGroup.setCoords();
+    canvas.requestRenderAll();
+  }
+}
+
+/** 把字图从 templateGroup 取出到 canvas 顶层，便于单独拖动/缩放 */
+function detachSlotImagesFromGroup() {
+  if (!templateGroup) return;
+  let changed = false;
+  slotFabricImages.forEach((img) => {
+    if (!img) return;
+    if (!templateGroup!.contains(img)) return;
+    templateGroup!.removeWithUpdate(img);
+    canvas.add(img);
+    changed = true;
+  });
+  if (changed) {
+    templateGroup.setCoords();
+    canvas.requestRenderAll();
+  }
+}
+
+function configureSlotFabricImage(img: fabric.Image, slotIndex: number) {
+  img.set({
+    borderColor: '#6366f1',
+    cornerColor: '#6366f1',
+    cornerStyle: 'circle',
+    transparentCorners: false,
+    lockScalingFlip: true,
+    lockRotation: true,
+    hasRotatingPoint: false,
+    centeredScaling: true,
+    lockMovementX: false,
+    lockMovementY: false,
+  });
+  img.setControlsVisibility({ mtr: false });
+  (img as fabric.Image & { __slotIndex?: number }).__slotIndex = slotIndex;
+  img.off('mousedblclick');
+  img.on('mousedblclick', (opt) => {
+    if (opt.e && typeof opt.e.stopPropagation === 'function') opt.e.stopPropagation();
+    if (step !== 2 || step2CanvasMode !== 'slot') return;
+    currentSlot = slotIndex;
+    openWarpModal();
+  });
 }
 
 function applyRefOpacity() {
@@ -236,8 +412,17 @@ function rebuildSlotButtons() {
   });
 }
 
+/** 清理画布顶层已脱出的 slot 字图，避免重建后残留 */
+function clearTopLevelSlotImages() {
+  slotFabricImages.forEach((im) => {
+    if (im && canvas?.getObjects().includes(im)) canvas.remove(im);
+  });
+}
+
 function createTemplateGroup(preserveTransform = false) {
   if (!canvas) return;
+  clearTopLevelSlotImages();
+  slotFabricImages = [];
   const cw = canvas.width!;
   const ch = canvas.height!;
   let prev: { left: number; top: number; scaleX: number; scaleY: number; angle: number } | null = null;
@@ -287,6 +472,7 @@ function rebuildTemplateWithImages(cb?: () => void) {
     return;
   }
   const { left, top, scaleX, scaleY, angle } = templateGroup;
+  clearTopLevelSlotImages();
   canvas.remove(templateGroup);
 
   const cw = canvas.width!;
@@ -297,10 +483,15 @@ function rebuildTemplateWithImages(cb?: () => void) {
 
   Promise.all(centers.map((c, i) => loadImageForSlot(slotUrls[i] ?? null, c, transparentPixel()))).then(
     (imgs) => {
+      slotFabricImages = new Array(ellipses.length).fill(null);
       const objs: fabric.Object[] = [frame];
       for (let i = 0; i < ellipses.length; i++) {
         const im = imgs[i];
-        if (im) objs.push(im);
+        if (im) {
+          configureSlotFabricImage(im, i);
+          slotFabricImages[i] = im;
+          objs.push(im);
+        }
         objs.push(ellipses[i], labels[i]);
       }
       const g = new fabric.Group(objs, fabricGroupOpts({ left, top, scaleX, scaleY, angle }));
@@ -378,22 +569,204 @@ function confirmWarp() {
 /* ---------- 笔刷 ---------- */
 let brushColor = '#1a1a1a';
 let brushSize = 10;
-let brushKind: 'pen' | 'chubby' | 'pencil' = 'pen';
+let brushKind: BrushId = 'pen';
 
 function updateBrush() {
-  const b = new fabric.PencilBrush(canvas);
-  b.color = brushColor;
-  if (brushKind === 'pen') {
-    b.width = brushSize;
-    b.decimate = 14;
-  } else if (brushKind === 'chubby') {
-    b.width = brushSize * 2.6;
-    b.decimate = 22;
-  } else {
-    b.width = brushSize * 0.85;
-    b.decimate = 4;
+  applyBrush(fabric, canvas, brushKind, brushColor, brushSize);
+}
+
+/* ---------- 「笔画」模式：选中笔画即时改色 / 粗细 / 效果 ---------- */
+function isHollowGroup(o: fabric.Object): boolean {
+  return !!(o as fabric.Object & { isHollow?: boolean }).isHollow;
+}
+
+function applyColorToOne(o: fabric.Object, color: string) {
+  if (isHollowGroup(o)) {
+    const sub = (o as fabric.Group)._objects?.[0];
+    if (sub) sub.set({ stroke: color });
+    return;
   }
-  canvas.freeDrawingBrush = b;
+  const cur = (o as fabric.Path).stroke;
+  if (cur && typeof cur === 'object') {
+    /** 铅笔 / 粉笔 用噪点 pattern：换色就要重新生成 pattern */
+    o.set({ stroke: createNoisePattern(fabric, color) });
+  } else {
+    o.set({ stroke: color });
+  }
+  /** 发光效果的 shadow 颜色跟着 stroke */
+  if ((o as fabric.Object & { customEffect?: string }).customEffect === 'neon') {
+    o.set({ shadow: new fabric.Shadow({ color, blur: 14, offsetX: 0, offsetY: 0 }) });
+  }
+}
+function applyColorToSelected(color: string) {
+  const objs = canvas.getActiveObjects();
+  if (!objs.length) return;
+  objs.forEach((o) => applyColorToOne(o, color));
+  canvas.requestRenderAll();
+}
+
+function applyWidthToOne(o: fabric.Object, w: number) {
+  if (isHollowGroup(o)) {
+    const subs = (o as fabric.Group)._objects;
+    if (subs && subs.length >= 2) {
+      const outerW = w * 2.2;
+      subs[0].set({ strokeWidth: outerW });
+      subs[1].set({ strokeWidth: outerW * 0.55 });
+    }
+    return;
+  }
+  o.set({ strokeWidth: w });
+}
+function applyWidthToSelected(w: number) {
+  const objs = canvas.getActiveObjects();
+  if (!objs.length) return;
+  objs.forEach((o) => applyWidthToOne(o, w));
+  canvas.requestRenderAll();
+}
+
+function applyEffectToOne(o: fabric.Object, eff: 'none' | 'neon' | 'emboss' | 'knockout') {
+  (o as fabric.Object & { customEffect?: string }).customEffect = eff;
+  if (eff === 'none') {
+    o.set({ globalCompositeOperation: 'source-over', shadow: null });
+  } else if (eff === 'knockout') {
+    o.set({ globalCompositeOperation: 'destination-out', shadow: null });
+  } else if (eff === 'neon') {
+    let c: string;
+    if (isHollowGroup(o)) {
+      const s = (o as fabric.Group)._objects?.[0]?.stroke;
+      c = typeof s === 'string' ? s : '#fff';
+    } else {
+      const s = (o as fabric.Path).stroke;
+      c = typeof s === 'string' ? s : '#fff';
+    }
+    o.set({
+      globalCompositeOperation: 'source-over',
+      shadow: new fabric.Shadow({ color: c, blur: 14, offsetX: 0, offsetY: 0 }),
+    });
+  } else if (eff === 'emboss') {
+    o.set({
+      globalCompositeOperation: 'source-over',
+      shadow: new fabric.Shadow({ color: 'rgba(0,0,0,0.5)', blur: 2, offsetX: 3, offsetY: 3 }),
+    });
+  }
+}
+function applyEffectToSelected(eff: 'none' | 'neon' | 'emboss' | 'knockout') {
+  const objs = canvas.getActiveObjects();
+  if (!objs.length) return;
+  objs.forEach((o) => applyEffectToOne(o, eff));
+  canvas.requestRenderAll();
+}
+
+function syncEffectRowVisibility() {
+  el('effect-row').classList.toggle('hidden', !(step === 3 && pathEditMode));
+}
+
+function syncEffectRowState() {
+  syncEffectRowVisibility();
+  const a = canvas.getActiveObject();
+  const cur = a ? (a as fabric.Object & { customEffect?: string }).customEffect || 'none' : 'none';
+  document.querySelectorAll('#effect-row .effect-btn').forEach((b) => {
+    b.classList.toggle('active', (b as HTMLElement).dataset.effect === cur);
+  });
+}
+
+function updateTraceBrush() {
+  if (!traceCanvas) return;
+  applyBrush(fabric, traceCanvas, brushKind, brushColor, brushSize);
+}
+
+function populateBrushScroll() {
+  const host = el('brush-scroll');
+  host.innerHTML = '';
+  BRUSHES.forEach((b) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'brush-pill' + (b.id === brushKind ? ' active' : '');
+    btn.dataset.brush = b.id;
+    btn.textContent = b.short;
+    btn.title = b.label;
+    host.appendChild(btn);
+  });
+}
+
+function setBrushKind(id: BrushId) {
+  brushKind = id;
+  populateBrushScroll();
+  updateBrush();
+  updateTraceBrush();
+}
+
+function dashAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
+  return new Promise((resolve) => {
+    obj.set({ opacity: 1 });
+    const g = obj as fabric.Group & { isHollow?: boolean };
+    if (g.isHollow && g._objects && g._objects[0]) {
+      const sub = g._objects[0] as fabric.Path;
+      const len = 5000;
+      sub.set({ strokeDashArray: [len, len], strokeDashOffset: len });
+      sub.animate(
+        { strokeDashOffset: 0 },
+        {
+          duration: dur,
+          easing: fabric.util.ease.easeOutSine,
+          onChange: () => canvas.renderAll(),
+          onComplete: () => {
+            sub.set({ strokeDashArray: null, strokeDashOffset: 0 });
+            canvas.renderAll();
+            resolve();
+          },
+        }
+      );
+      return;
+    }
+    if (obj.type !== 'path') {
+      resolve();
+      return;
+    }
+    const p = obj as fabric.Path;
+    const len = 5000;
+    p.set({ strokeDashArray: [len, len], strokeDashOffset: len });
+    p.animate(
+      { strokeDashOffset: 0 },
+      {
+        duration: dur,
+        easing: fabric.util.ease.easeOutSine,
+        onChange: () => canvas.renderAll(),
+        onComplete: () => {
+          p.set({ strokeDashArray: null, strokeDashOffset: 0 });
+          canvas.renderAll();
+          resolve();
+        },
+      }
+    );
+  });
+}
+
+async function runExportPlayback(paths: fabric.Object[]) {
+  const replay = (el('replay-mode') as HTMLSelectElement).value;
+  const dur = paths.length > 10 ? 120 : 280;
+  const pause = paths.length > 10 ? 12 : 36;
+  if (replay === 'char') {
+    const bucket = new Map<number, fabric.Object[]>();
+    for (const p of paths) {
+      const k = (p as fabric.Object & { __slotIndex?: number }).__slotIndex;
+      const key = k != null ? k : 998;
+      if (!bucket.has(key)) bucket.set(key, []);
+      bucket.get(key).push(p);
+    }
+    const keys = [...bucket.keys()].sort((a, b) => a - b);
+    for (const k of keys) {
+      const grp = bucket.get(k)!;
+      await Promise.all(grp.map((o) => dashAnimateObject(o, dur)));
+      await new Promise((r) => setTimeout(r, pause));
+    }
+    return;
+  }
+  for (const p of paths) {
+    if (!canvas.getObjects().includes(p)) continue;
+    await dashAnimateObject(p, dur);
+    await new Promise((r) => setTimeout(r, pause));
+  }
 }
 
 /* ---------- 导出视频 ---------- */
@@ -447,30 +820,7 @@ async function exportVideo() {
     recorder.start();
   }
 
-  const dur = paths.length > 10 ? 120 : 280;
-  const pause = paths.length > 10 ? 12 : 36;
-
-  for (const p of paths) {
-    if (!canvas.getObjects().includes(p)) continue;
-    await new Promise<void>((resolve) => {
-      p.set({ opacity: 1 });
-      const len = 5000;
-      p.set({ strokeDashArray: [len, len], strokeDashOffset: len });
-      p.animate(
-        { strokeDashOffset: 0 },
-        {
-          duration: dur,
-          easing: fabric.util.ease.easeOutSine,
-          onChange: () => canvas.renderAll(),
-          onComplete: () => {
-            p.set({ strokeDashArray: null, strokeDashOffset: 0 });
-            canvas.renderAll();
-            setTimeout(resolve, pause);
-          },
-        }
-      );
-    });
-  }
+  await runExportPlayback(paths);
 
   anim = false;
   await new Promise((r) => setTimeout(r, 400));
@@ -496,6 +846,286 @@ async function exportVideo() {
   canvas.renderAll();
 }
 
+/* ---------- 大字描写 ---------- */
+function initTraceCanvas() {
+  if (traceCanvas) return;
+  traceCanvas = new fabric.Canvas('trace-canvas', {
+    isDrawingMode: true,
+    selection: false,
+  });
+  traceCanvas.on('path:created', (e: { path?: fabric.Object }) => {
+    let p = e.path;
+    if (!p) return;
+    p = postProcessPath(fabric, traceCanvas, p, brushKind, brushColor);
+    /** strokeUniform: 之后在 flush 时整体 scale，stroke 不会跟随变细 → 粗细一致 */
+    p.set({ selectable: false, evented: true, strokeUniform: true });
+    if ((p as fabric.Group)._objects) {
+      (p as fabric.Group)._objects.forEach((sub) => sub.set({ strokeUniform: true }));
+    }
+    pendingTracePaths.push(p);
+  });
+}
+
+function syncTraceCanvasSize() {
+  if (!traceCanvas || !canvas) return;
+  traceCanvas.setDimensions({ width: canvas.getWidth(), height: canvas.getHeight() });
+}
+
+function renderTraceSlotGuide() {
+  if (!traceCanvas) return;
+  const slotIdx = traceSlotOrder[traceCursor];
+  const url = slotUrls[slotIdx];
+  traceGuideImage = null;
+  traceCanvas.clear();
+  pendingTracePaths.length = 0;
+  if (!url) {
+    traceCanvas.renderAll();
+    updateTraceBrush();
+    return;
+  }
+  /** 直接用 slotUrls 的 PNG 数据（来自田字格输出），重新居中、按短边 75% 等比放大；
+   *  完全不依赖 main canvas 上 image 当前的 left/top/scale（那些可能是 group 局部坐标） */
+  fabric.Image.fromURL(url, (img: fabric.Image) => {
+    if (!traceCanvas) return;
+    const cw = traceCanvas.getWidth();
+    const ch = traceCanvas.getHeight();
+    const iw = img.width || 1;
+    const ih = img.height || 1;
+    const target = Math.min(cw, ch) * 0.75;
+    const k = target / Math.max(iw, ih);
+    img.set({
+      left: cw / 2,
+      top: ch / 2,
+      originX: 'center',
+      originY: 'center',
+      scaleX: k,
+      scaleY: k,
+      opacity: 0.32,
+      selectable: false,
+      evented: false,
+      hasControls: false,
+      lockMovementX: true,
+      lockMovementY: true,
+    });
+    traceCanvas.add(img);
+    traceCanvas.sendToBack(img);
+    traceGuideImage = img;
+    traceCanvas.renderAll();
+  });
+  updateTraceBrush();
+}
+
+function updateTraceModalTitle() {
+  const slotIdx = traceSlotOrder[traceCursor];
+  const circles = getCircleElements(selectedPosterTemplate);
+  const lab = circledSlotLabel(circles[slotIdx]?.n, slotIdx);
+  el('trace-title').textContent = `大字描写 · 字${lab}（${traceCursor + 1}/${traceSlotOrder.length}）`;
+}
+
+function discardPendingTraceStrokes() {
+  if (!traceCanvas) return;
+  pendingTracePaths.forEach((p) => {
+    try {
+      traceCanvas.remove(p);
+    } catch (_) {
+      /* */
+    }
+  });
+  pendingTracePaths.length = 0;
+}
+
+function openTraceModal() {
+  traceSlotOrder = slotUrls.map((u, i) => (u ? i : -1)).filter((i) => i >= 0);
+  if (!traceSlotOrder.length) {
+    toast('请先在第 3 步为至少一个槽位生成参考字');
+    return;
+  }
+  traceCursor = 0;
+  traceModalOpen = true;
+  initTraceCanvas();
+  syncTraceCanvasSize();
+  traceCanvas.discardActiveObject();
+  traceCanvas.isDrawingMode = true;
+  renderTraceSlotGuide();
+  updateTraceModalTitle();
+  applyStepMode();
+  el('trace-modal').classList.remove('hidden');
+}
+
+function closeTraceModal() {
+  discardPendingTraceStrokes();
+  traceCanvas?.clear();
+  traceGuideImage = null;
+  traceModalOpen = false;
+  el('trace-modal').classList.add('hidden');
+  applyStepMode();
+}
+
+/** 取对象在所在 fabric canvas 上的世界包围盒（含祖先 group transform） */
+function worldRect(o: fabric.Object) {
+  const r = o.getBoundingRect(true, true);
+  return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, w: r.width, h: r.height };
+}
+
+function flushCurrentTraceSlotToMain() {
+  if (!traceCanvas || !pendingTracePaths.length) return;
+  const slotIdx = traceSlotOrder[traceCursor];
+  const slotImg = slotFabricImages[slotIdx];
+
+  /** 把 trace 弹层里写出的 path（按全屏放大写）映射到主画布对应槽位的字图大小：
+   *  guideRect → slotRect 的等比缩放 + 中心对齐。strokeUniform 让粗细保持当前 brushSize。*/
+  let map: { tx: number; ty: number; gx: number; gy: number; k: number } | null = null;
+  if (traceGuideImage && slotImg) {
+    const t = worldRect(traceGuideImage);
+    const s = worldRect(slotImg);
+    const guideSize = Math.max(t.w, t.h);
+    const slotSize = Math.max(s.w, s.h);
+    if (guideSize > 0 && slotSize > 0) {
+      map = { tx: t.cx, ty: t.cy, gx: s.cx, gy: s.cy, k: slotSize / guideSize };
+    }
+  }
+
+  pendingTracePaths.forEach((p) => {
+    traceCanvas!.remove(p);
+    (p as fabric.Object & { __slotIndex?: number }).__slotIndex = slotIdx;
+    if (map) {
+      const c = worldRect(p);
+      const newCx = map.gx + (c.cx - map.tx) * map.k;
+      const newCy = map.gy + (c.cy - map.ty) * map.k;
+      p.set({
+        scaleX: (p.scaleX || 1) * map.k,
+        scaleY: (p.scaleY || 1) * map.k,
+        strokeUniform: true,
+      });
+      p.setPositionByOrigin(new fabric.Point(newCx, newCy), 'center', 'center');
+      p.setCoords();
+    }
+    p.set({ selectable: step === 3 && pathEditMode, evented: true });
+    canvas.add(p);
+    drawHistory.push(p);
+  });
+  pendingTracePaths.length = 0;
+  traceCanvas.discardActiveObject();
+  traceCanvas.clear();
+  traceGuideImage = null;
+  canvas.renderAll();
+  traceCanvas.renderAll();
+}
+
+function advanceTraceAfterDone() {
+  flushCurrentTraceSlotToMain();
+  traceCursor += 1;
+  if (traceCursor >= traceSlotOrder.length) {
+    toast('本轮大字描写已合并到主画布');
+    closeTraceModal();
+    return;
+  }
+  renderTraceSlotGuide();
+  updateTraceModalTitle();
+}
+
+/* ---------- 自由画布：双指缩放 + 滚轮缩放 + 平移（参考 Example.html） ---------- */
+function setupCanvasZoomPan() {
+  const wrap = el('stage-wrap');
+  const resetBtn = el('btn-reset-view');
+  const MIN_Z = 0.3;
+  const MAX_Z = 5;
+  let pinching = false;
+  let savedDrawingMode = false;
+  let initialDist = 0;
+  let initialZoom = 1;
+  let lastCenter = { x: 0, y: 0 };
+
+  /** 视图变化（缩放 / 平移）后显示「复位」 */
+  const showReset = () => {
+    const vpt = canvas.viewportTransform!;
+    const dirty =
+      Math.abs(vpt[0] - 1) > 0.001 ||
+      Math.abs(vpt[3] - 1) > 0.001 ||
+      Math.abs(vpt[4]) > 0.5 ||
+      Math.abs(vpt[5]) > 0.5;
+    resetBtn.classList.toggle('hidden', !dirty);
+  };
+
+  const localPoint = (clientX: number, clientY: number) => {
+    const r = (canvas.upperCanvasEl as HTMLCanvasElement).getBoundingClientRect();
+    return { x: clientX - r.left, y: clientY - r.top };
+  };
+
+  wrap.addEventListener(
+    'touchstart',
+    (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        pinching = true;
+        savedDrawingMode = canvas.isDrawingMode;
+        canvas.isDrawingMode = false;
+        const a = e.touches[0];
+        const b = e.touches[1];
+        initialDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+        initialZoom = canvas.getZoom();
+        lastCenter = {
+          x: (a.clientX + b.clientX) / 2,
+          y: (a.clientY + b.clientY) / 2,
+        };
+      }
+    },
+    { passive: false }
+  );
+
+  wrap.addEventListener(
+    'touchmove',
+    (e: TouchEvent) => {
+      if (!pinching || e.touches.length < 2) return;
+      e.preventDefault();
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      let zoom = initialZoom * (dist / Math.max(1, initialDist));
+      zoom = Math.min(MAX_Z, Math.max(MIN_Z, zoom));
+      const center = {
+        x: (a.clientX + b.clientX) / 2,
+        y: (a.clientY + b.clientY) / 2,
+      };
+      const local = localPoint(center.x, center.y);
+      canvas.zoomToPoint(new fabric.Point(local.x, local.y), zoom);
+      canvas.relativePan(new fabric.Point(center.x - lastCenter.x, center.y - lastCenter.y));
+      lastCenter = center;
+      showReset();
+    },
+    { passive: false }
+  );
+
+  const endPinch = () => {
+    if (!pinching) return;
+    pinching = false;
+    canvas.isDrawingMode = savedDrawingMode;
+  };
+  wrap.addEventListener('touchend', (e: TouchEvent) => {
+    if (e.touches.length < 2) endPinch();
+  });
+  wrap.addEventListener('touchcancel', endPinch);
+
+  wrap.addEventListener(
+    'wheel',
+    (e: WheelEvent) => {
+      e.preventDefault();
+      let zoom = canvas.getZoom();
+      zoom *= Math.pow(0.999, e.deltaY);
+      zoom = Math.min(MAX_Z, Math.max(MIN_Z, zoom));
+      const local = localPoint(e.clientX, e.clientY);
+      canvas.zoomToPoint(new fabric.Point(local.x, local.y), zoom);
+      showReset();
+    },
+    { passive: false }
+  );
+
+  resetBtn.addEventListener('click', () => {
+    canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+    canvas.requestRenderAll();
+    resetBtn.classList.add('hidden');
+  });
+}
+
 /* ---------- 初始化 ---------- */
 function init() {
   canvas = new fabric.Canvas('main', {
@@ -505,10 +1135,22 @@ function init() {
   });
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
+  setupCanvasZoomPan();
 
-  canvas.on('path:created', (e: { path?: fabric.Path }) => {
-    const p = e.path;
-    if (p) drawHistory.push(p);
+  canvas.on('path:created', (e: { path?: fabric.Object }) => {
+    if (traceModalOpen) return;
+    let p = e.path;
+    if (!p) return;
+    p = postProcessPath(fabric, canvas, p, brushKind, brushColor);
+    p.set({
+      selectable: step === 3 && pathEditMode,
+      evented: true,
+      strokeUniform: true,
+    });
+    if ((p as fabric.Group)._objects) {
+      (p as fabric.Group)._objects.forEach((sub) => sub.set({ strokeUniform: true }));
+    }
+    drawHistory.push(p);
   });
 
   el('input-photo').addEventListener('change', (ev) => {
@@ -539,7 +1181,7 @@ function init() {
     }
     if (step === 2) {
       if (!slotUrls[0]) {
-        toast('请先完成第一个写字槽（邪修）');
+        toast('请先在第 3 步完成第一个槽位的参考字');
         return;
       }
       rebuildTemplateWithImages();
@@ -701,21 +1343,18 @@ function init() {
     }
   );
 
-  document.querySelectorAll('#panel-3 .chip').forEach((c) => {
-    c.addEventListener('click', () => {
-      document.querySelectorAll('#panel-3 .chip').forEach((x) => x.classList.remove('active'));
-      c.classList.add('active');
-      brushKind = (c as HTMLElement).dataset.brush as typeof brushKind;
-      updateBrush();
-    });
-  });
   el('brush-color').addEventListener('input', () => {
     brushColor = (el('brush-color') as HTMLInputElement).value;
     updateBrush();
+    updateTraceBrush();
+    /** 「笔画」模式且有选中：实时把颜色应用到选中笔迹 */
+    if (step === 3 && pathEditMode) applyColorToSelected(brushColor);
   });
   el('brush-size').addEventListener('input', () => {
     brushSize = Number((el('brush-size') as HTMLInputElement).value);
     updateBrush();
+    updateTraceBrush();
+    if (step === 3 && pathEditMode) applyWidthToSelected(brushSize);
   });
 
   el('btn-ref').addEventListener('click', () => {
@@ -725,6 +1364,96 @@ function init() {
     canvas.renderAll();
   });
 
+  el('btn-step2-poster').addEventListener('click', () => {
+    if (step !== 2) return;
+    step2CanvasMode = 'poster';
+    canvas.discardActiveObject();
+    applyStepMode();
+  });
+  el('btn-step2-slot').addEventListener('click', () => {
+    if (step !== 2) return;
+    step2CanvasMode = 'slot';
+    canvas.discardActiveObject();
+    applyStepMode();
+    toast('点红圈里的参考字即可拖动、缩放');
+  });
+
+  el('btn-path-edit').addEventListener('click', () => {
+    if (step !== 3) return;
+    pathEditMode = !pathEditMode;
+    applyStepMode();
+    syncEffectRowVisibility();
+    if (!pathEditMode) canvas.discardActiveObject();
+    toast(
+      pathEditMode
+        ? '笔画模式：点选笔画后用上方颜色 / 粗细 / 效果即时调整'
+        : '已恢复自由写字'
+    );
+  });
+
+  el('effect-row').addEventListener('click', (ev) => {
+    const t = (ev.target as HTMLElement).closest('.effect-btn') as HTMLButtonElement | null;
+    if (!t) return;
+    const eff = t.dataset.effect as 'none' | 'neon' | 'emboss' | 'knockout';
+    document.querySelectorAll('#effect-row .effect-btn').forEach((b) => b.classList.remove('active'));
+    t.classList.add('active');
+    applyEffectToSelected(eff);
+  });
+
+  el('btn-delete-stroke').addEventListener('click', () => {
+    const objs = canvas.getActiveObjects();
+    if (!objs.length) return;
+    canvas.discardActiveObject();
+    objs.forEach((o) => {
+      const idx = drawHistory.indexOf(o);
+      if (idx >= 0) drawHistory.splice(idx, 1);
+      canvas.remove(o);
+    });
+    canvas.requestRenderAll();
+    syncEffectRowState();
+  });
+
+  canvas.on('selection:created', syncEffectRowState);
+  canvas.on('selection:updated', syncEffectRowState);
+  canvas.on('selection:cleared', syncEffectRowState);
+
+  el('btn-trace-big').addEventListener('click', () => {
+    if (step !== 3) return;
+    openTraceModal();
+  });
+
+  el('trace-close').addEventListener('click', () => {
+    discardPendingTraceStrokes();
+    closeTraceModal();
+  });
+  el('trace-exit-all').addEventListener('click', () => {
+    flushCurrentTraceSlotToMain();
+    closeTraceModal();
+    toast('已合并当前字并退出');
+  });
+  el('trace-done-slot').addEventListener('click', () => advanceTraceAfterDone());
+  el('trace-prev').addEventListener('click', () => {
+    if (!traceModalOpen) return;
+    discardPendingTraceStrokes();
+    traceCanvas?.clear();
+    traceCursor = Math.max(0, traceCursor - 1);
+    renderTraceSlotGuide();
+    updateTraceModalTitle();
+  });
+  el('trace-next').addEventListener('click', () => {
+    if (!traceModalOpen) return;
+    flushCurrentTraceSlotToMain();
+    traceCursor = Math.min(traceSlotOrder.length - 1, traceCursor + 1);
+    renderTraceSlotGuide();
+    updateTraceModalTitle();
+  });
+  el('trace-modal').addEventListener('click', (e) => {
+    if (e.target === el('trace-modal')) {
+      discardPendingTraceStrokes();
+      closeTraceModal();
+    }
+  });
+
   el('btn-undo').addEventListener('click', () => {
     const p = drawHistory.pop();
     if (p && canvas.getObjects().includes(p)) {
@@ -732,6 +1461,13 @@ function init() {
       canvas.renderAll();
       toast('已撤回');
     } else toast('没有可撤回的笔迹');
+  });
+
+  populateBrushScroll();
+  el('brush-scroll').addEventListener('click', (ev) => {
+    const b = (ev.target as HTMLElement).closest('.brush-pill') as HTMLButtonElement | null;
+    if (!b?.dataset.brush) return;
+    setBrushKind(b.dataset.brush as BrushId);
   });
 
   syncSlotsForTemplateChange(true);

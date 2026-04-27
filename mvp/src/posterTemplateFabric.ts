@@ -66,6 +66,9 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
     originY: 'center',
     left: 0,
     top: 0,
+    /** 不抢命中：让 Group.subTargetCheck 能点到下层邪修字图 */
+    evented: false,
+    selectable: false,
   });
   const circles = getCircleElements(template);
   const ellipses: fabric.Ellipse[] = [];
@@ -88,6 +91,8 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
         fill: 'rgba(255,255,255,0.12)',
         stroke: '#e32219',
         strokeDashArray: [5, 4],
+        evented: false,
+        selectable: false,
       })
     );
     const fs = Math.max(10, Math.min(rxPx, ryPx) * 1.65);
@@ -100,6 +105,8 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
         fontSize: fs,
         fontWeight: '900',
         fill: '#e32219',
+        evented: false,
+        selectable: false,
       })
     );
     centers.push({ x: lx, y: ly, rx: rxPx, ry: ryPx });
@@ -111,6 +118,7 @@ export function fabricGroupOpts(overrides: Record<string, unknown> = {}) {
   return {
     originX: 'center',
     originY: 'center',
+    /** 允许选中组内邪修字图单独缩放；依赖子元素 evented 与堆叠顺序 */
     subTargetCheck: true,
     cornerColor: '#6366f1',
     cornerStyle: 'circle',

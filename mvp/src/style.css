@@ -1,14 +1,27 @@
 :root {
-  --bg: #0f0f10;
-  --card: #1a1a1c;
-  --text: #f4f4f5;
-  --muted: #9ca3af;
-  --accent: #ec4899;
-  --accent-2: #6366f1;
+  /* Apple-inspired dark surface palette + 单一蓝色操作色 */
+  --bg: #000000;
+  --surface-1: #1c1c1e;
+  --surface-2: #232326;
+  --surface-3: #2a2a2d;
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+  --text: #f5f5f7;
+  --text-2: #c7c7cc;
+  --muted: #8e8e93;
+  --accent: #0a84ff;
+  --accent-press: #0066cc;
+  --accent-soft: rgba(10, 132, 255, 0.16);
+  --accent-soft-strong: rgba(10, 132, 255, 0.28);
+  --warn: #ff453a;
   --safe-b: env(safe-area-inset-bottom, 12px);
   --safe-t: env(safe-area-inset-top, 8px);
-  --bar-h: 52px;
-  --sheet-max: 42vh;
+  --topbar-h: 44px;
+  --meta-h: 48px;
+  --bottombar-h: 56px;
+  --sheet-max: 36vh;
+  --sheet-draw-max: min(28vh, 220px);
+  --sheet-step2-max: min(34vh, 280px);
 }
 
 *,
@@ -23,11 +36,14 @@ body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text',
+    'PingFang SC', 'Helvetica Neue', sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
   overflow: hidden;
   user-select: none;
+  letter-spacing: -0.01em;
 }
 
 #app {
@@ -38,75 +54,95 @@ body {
   min-height: 0;
 }
 
+/* ---------- 顶部栏：紧凑、无大色块 ---------- */
 .top-bar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: calc(8px + var(--safe-t)) 14px 8px;
-  background: rgba(15, 15, 16, 0.92);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: calc(6px + var(--safe-t)) 16px 6px;
+  height: calc(var(--topbar-h) + var(--safe-t));
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .brand {
-  font-weight: 800;
-  font-size: 17px;
+  font-family: 'Inter Tight', 'Inter', -apple-system, sans-serif;
+  font-weight: 600;
+  font-size: 15px;
   letter-spacing: -0.02em;
+  color: var(--text);
 }
 
 .steps {
   display: flex;
+  align-items: center;
   gap: 6px;
 }
 
 .steps .dot {
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   display: grid;
   place-items: center;
   font-size: 11px;
-  font-weight: 700;
-  background: #2a2a2e;
+  font-weight: 600;
+  background: var(--surface-2);
   color: var(--muted);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hairline);
+  letter-spacing: 0;
+  transition: background 0.18s, color 0.18s, transform 0.18s;
 }
 
 .steps .dot.active {
   background: var(--accent);
   color: #fff;
   border-color: transparent;
+  transform: scale(1.08);
 }
 
 .steps .dot.done {
-  background: var(--accent-2);
-  color: #fff;
+  background: var(--accent-soft-strong);
+  color: var(--text);
+  border-color: transparent;
+}
+
+/* ---------- 步骤标题：单行节省高度 ---------- */
+.step-meta {
+  flex: 0 0 auto;
+  padding: 8px 16px 6px;
 }
 
 .step-title {
-  margin: 10px 16px 0;
+  margin: 0;
+  font-family: 'Inter Tight', 'Inter', -apple-system, sans-serif;
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  color: var(--text);
 }
 
 .step-hint {
-  margin: 4px 16px 8px;
-  font-size: 13px;
+  margin: 2px 0 0;
+  font-size: 12px;
   color: var(--muted);
-  line-height: 1.45;
+  line-height: 1.4;
+  letter-spacing: -0.005em;
 }
 
+/* ---------- 画布：尽可能让画布占据屏幕 ---------- */
 #stage-wrap {
   flex: 1;
   min-height: 0;
   position: relative;
   z-index: 0;
   overflow: hidden;
-  background: #050506;
+  background: #050507;
 }
 
-/* 防止 fabric 上层 canvas 溢出到下方按钮区，导致「下一步」点不动 */
 #stage-wrap .canvas-container {
   max-width: 100% !important;
   max-height: 100% !important;
@@ -118,13 +154,44 @@ body {
   height: 100%;
 }
 
+/* 浮动复位按钮：缩放/平移过后才显示 */
+.canvas-reset {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline-strong);
+  background: rgba(28, 28, 30, 0.78);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.36);
+  transition: transform 0.15s ease, opacity 0.2s ease;
+}
+.canvas-reset:active {
+  transform: scale(0.96);
+}
+.canvas-reset.hidden {
+  display: none;
+}
+
+/* ---------- 底部 sheet：去重底色，使用毛玻璃 ---------- */
 .sheet {
   flex: 0 0 auto;
   max-height: var(--sheet-max);
   overflow-y: auto;
   padding: 12px 16px calc(12px + var(--safe-b));
-  background: var(--card);
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(28, 28, 30, 0.92);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-top: 1px solid var(--hairline);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -136,220 +203,467 @@ body {
   display: none;
 }
 
-.big-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 48px;
-  padding: 14px 18px;
-  border-radius: 14px;
-  font-size: 16px;
-  font-weight: 700;
-  border: none;
-  cursor: pointer;
-  width: 100%;
+.sheet.sheet-draw {
+  max-height: var(--sheet-draw-max);
+  padding: 10px 14px calc(10px + var(--safe-b));
+  gap: 8px;
 }
 
-.big-btn.primary {
-  background: linear-gradient(135deg, #ec4899, #db2777);
-  color: #fff;
+.sheet.sheet-step2 {
+  max-height: var(--sheet-step2-max);
+  gap: 10px;
 }
 
-.big-btn.secondary {
-  background: #2d2d32;
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-.big-btn.ghost {
-  background: transparent;
-  color: var(--text);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.big-btn:active {
-  transform: scale(0.98);
+/* ---------- caption：行内提示，不再做大块卡片 ---------- */
+.caption {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  letter-spacing: -0.005em;
 }
 
 .inline-tip {
   text-align: center;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 12px;
   margin: 0;
 }
 
+.mini {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin: 0;
+  text-align: center;
+  letter-spacing: -0.005em;
+}
+
+/* ---------- iOS 段控（segmented control） ---------- */
+.seg {
+  display: flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: 10px;
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+}
+
+.seg-btn {
+  flex: 1;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  letter-spacing: -0.01em;
+  transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+}
+
+.seg-btn.active {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+/* ---------- 胶囊按钮 ---------- */
+.pill-btn {
+  flex: 1 1 auto;
+  min-height: 36px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+  transition: background 0.18s, transform 0.12s, border-color 0.18s, color 0.18s;
+  white-space: nowrap;
+}
+
+.pill-btn:active {
+  transform: scale(0.97);
+}
+
+.pill-btn.active {
+  background: var(--accent-soft);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.pill-btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.pill-btn.primary:active {
+  background: var(--accent-press);
+}
+
+/* ---------- 大按钮（仅第 1 步 / 模态主操作） ---------- */
+.big-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  padding: 12px 18px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+  font-family: inherit;
+  transition: transform 0.12s, background 0.18s;
+}
+
+.big-btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.big-btn.primary:active {
+  background: var(--accent-press);
+}
+
+.big-btn.secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--hairline);
+}
+
+.big-btn.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--hairline-strong);
+}
+
+.big-btn:active {
+  transform: scale(0.985);
+}
+
+/* ---------- 第 4 步：紧凑工具条 ---------- */
+.brush-scroll {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0 4px;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+
+.brush-scroll::-webkit-scrollbar {
+  height: 3px;
+}
+
+.brush-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.brush-pill {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s, border-color 0.18s;
+}
+
+.brush-pill.active {
+  background: var(--accent-soft);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.draw-row-mini {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ico-color {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid var(--hairline-strong);
+  flex: 0 0 auto;
+  position: relative;
+  background: #1a1a1a;
+}
+
+.ico-color input {
+  width: 200%;
+  height: 200%;
+  margin: -50%;
+  cursor: pointer;
+  border: none;
+}
+
+.size-slider {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.replay-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  letter-spacing: -0.005em;
+}
+
+.mini-select {
+  min-height: 28px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  max-width: 110px;
+}
+
+.draw-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 选中笔画效果栏：进入「笔画」模式后出现 */
+.effect-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hairline);
+}
+.effect-row.hidden {
+  display: none;
+}
+.effect-row .pill-btn {
+  flex: 1 1 0;
+  min-width: 56px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.effect-row .pill-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: none;
+}
+.pill-btn.warn {
+  flex: 0 0 auto;
+  min-width: 40px;
+  color: var(--warn);
+  border-color: rgba(255, 69, 58, 0.3);
+}
+.pill-btn.warn:active {
+  background: rgba(255, 69, 58, 0.16);
+}
+
+.foot-hint {
+  margin: 0;
+  line-height: 1.35;
+}
+
+/* ---------- 第 2 步：模板列表 ---------- */
 .tpl-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--muted);
+  letter-spacing: -0.005em;
 }
 
 .tpl-select {
   width: 100%;
-  min-height: 44px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: #111;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface-1);
   color: var(--text);
-  font-size: 15px;
+  font-family: inherit;
+  font-size: 14px;
 }
 
 .tpl-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  max-height: 120px;
+  gap: 6px;
+  max-height: 110px;
   overflow-y: auto;
   padding: 2px 0;
 }
 
 .tpl-btn {
   flex: 0 0 auto;
-  min-height: 40px;
-  padding: 8px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: #252528;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 700;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s, border-color 0.18s;
 }
 
 .tpl-btn.active {
-  border-color: var(--accent-2);
-  background: rgba(99, 102, 241, 0.2);
+  border-color: transparent;
+  background: var(--accent);
   color: #fff;
 }
 
+/* ---------- 第 3 步：槽位 + 字 + 微调 ---------- */
 .slot-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .slot-btn {
-  flex: 1;
-  min-height: 44px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: #252528;
+  flex: 1 1 auto;
+  min-width: 44px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
   color: var(--text);
-  font-weight: 700;
-  font-size: 15px;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, color 0.18s;
 }
 
 .slot-btn.active {
-  border-color: var(--accent);
-  background: rgba(236, 72, 153, 0.15);
-}
-
-.char-in {
-  width: 100%;
-  min-height: 48px;
-  text-align: center;
-  font-size: 28px;
-  font-weight: 900;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: #111;
+  border-color: transparent;
+  background: var(--accent);
   color: #fff;
 }
 
-.mini {
-  font-size: 12px;
-  color: var(--muted);
-  margin: 0;
-  text-align: center;
-}
-
-.tool-row {
+.char-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  gap: 8px;
+  align-items: stretch;
 }
 
-.chip {
-  flex: 1;
+.char-in {
+  flex: 0 0 56px;
   min-height: 40px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #252528;
+  text-align: center;
+  font-size: 22px;
+  font-weight: 700;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface-1);
   color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
+  font-family: inherit;
 }
 
-.chip.active {
-  background: #fff;
-  color: #111;
-  border-color: #fff;
+.char-row .pill-btn.primary {
+  flex: 1 1 auto;
+  min-height: 40px;
+  padding: 10px 16px;
+  font-size: 14px;
 }
 
-.color-wrap {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  overflow: hidden;
-  border: 2px solid rgba(255, 255, 255, 0.2);
-}
-
-.color-wrap input {
-  width: 200%;
-  height: 200%;
-  transform: translate(-25%, -25%);
-  cursor: pointer;
-}
-
-#brush-size {
-  flex: 1;
-  accent-color: var(--accent);
-}
-
+/* ---------- 底栏导航 ---------- */
 .bottom-bar {
   flex: 0 0 auto;
   display: flex;
-  gap: 10px;
-  padding: 10px 14px calc(10px + var(--safe-b));
-  background: rgba(15, 15, 16, 0.96);
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 8px;
+  padding: 8px 14px calc(8px + var(--safe-b));
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-top: 1px solid var(--hairline);
   position: relative;
   z-index: 20;
 }
 
 .nav-btn {
   flex: 1;
-  min-height: 48px;
-  border-radius: 14px;
-  font-size: 16px;
-  font-weight: 700;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: #252528;
+  min-height: 42px;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
   color: var(--text);
+  cursor: pointer;
+  transition: background 0.18s, transform 0.12s;
+}
+
+.nav-btn:active {
+  transform: scale(0.985);
 }
 
 .nav-btn.primary {
-  background: #fff;
-  color: #111;
-  border-color: #fff;
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
 }
 
+.nav-btn.primary:active {
+  background: var(--accent-press);
+}
+
+/* ---------- toast / 浮提示 ---------- */
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(96px + var(--safe-b));
+  bottom: calc(80px + var(--safe-b));
   transform: translateX(-50%) translateY(20px);
-  padding: 10px 18px;
+  padding: 9px 16px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.85);
-  color: #fff;
-  font-size: 14px;
+  background: rgba(28, 28, 30, 0.94);
+  border: 1px solid var(--hairline);
+  color: var(--text);
+  font-size: 13px;
+  letter-spacing: -0.005em;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.25s, transform 0.25s;
+  transition: opacity 0.22s, transform 0.22s;
   z-index: 50;
   max-width: 90vw;
   text-align: center;
@@ -360,12 +674,79 @@ body {
   transform: translateX(-50%) translateY(0);
 }
 
-/* 邪修弹层 */
+/* ---------- 大字描写弹层（保留） ---------- */
+.modal-trace .trace-inner {
+  width: 100%;
+  max-width: 520px;
+  max-height: 94vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-1);
+  border-radius: 22px 22px 0 0;
+  padding: 14px 16px calc(14px + var(--safe-b));
+  border: 1px solid var(--hairline);
+}
+
+.modal-trace {
+  align-items: flex-end;
+}
+
+.trace-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: 'Inter Tight', 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.015em;
+}
+
+.trace-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0 8px;
+  letter-spacing: -0.005em;
+}
+
+.trace-stage-wrap {
+  position: relative;
+  width: 100%;
+  flex: 1;
+  min-height: 200px;
+  max-height: min(72vh, 560px);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #050507;
+  border: 1px solid var(--hairline);
+}
+
+#trace-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.trace-foot {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.trace-foot .nav-btn {
+  flex: 1;
+}
+
+.modal-trace .big-btn.full {
+  margin-top: 10px;
+}
+
+/* ---------- 田字格弹层 ---------- */
 .modal {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(0, 0, 0, 0.72);
+  background: rgba(0, 0, 0, 0.7);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -381,50 +762,54 @@ body {
   max-width: 480px;
   max-height: 92vh;
   overflow-y: auto;
-  background: #161618;
-  border-radius: 20px 20px 0 0;
+  background: var(--surface-1);
+  border-radius: 22px 22px 0 0;
   padding: 14px 16px calc(20px + var(--safe-b));
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hairline);
 }
 
 .modal-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-weight: 800;
-  font-size: 17px;
+  font-family: 'Inter Tight', 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.015em;
   margin-bottom: 10px;
 }
 
 .icon-btn {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   border: none;
   border-radius: 50%;
-  background: #2a2a2e;
-  color: #fff;
-  font-size: 18px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 15px;
   cursor: pointer;
+  font-family: inherit;
 }
 
 .warp-font-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--muted);
   margin-bottom: 6px;
 }
 
 .modal-select {
   width: 100%;
-  min-height: 44px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #111;
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface-2);
   color: var(--text);
+  font-family: inherit;
   font-size: 14px;
 }
 
@@ -433,6 +818,7 @@ body {
   color: var(--muted);
   line-height: 1.4;
   margin: 0 0 8px;
+  letter-spacing: -0.005em;
 }
 
 .warp-stage {
@@ -443,8 +829,8 @@ body {
   margin: 0 auto 12px;
   border-radius: 16px;
   overflow: hidden;
-  border: 2px dashed rgba(236, 72, 153, 0.45);
-  background: #0a0a0a;
+  border: 1.5px dashed rgba(10, 132, 255, 0.55);
+  background: #050507;
   touch-action: none;
 }
 
@@ -469,7 +855,7 @@ body {
 }
 
 .warp-corner-handle {
-  fill: #ec4899;
+  fill: var(--accent);
   stroke: #fff;
   stroke-width: 2.5;
   cursor: grab;
@@ -481,7 +867,7 @@ body {
 }
 
 .warp-axis-handle {
-  fill: #63b3ed;
+  fill: #2997ff;
   stroke: #fff;
   stroke-width: 2;
   cursor: grab;
@@ -493,7 +879,7 @@ body {
 }
 
 .warp-frame-line {
-  stroke: rgba(236, 72, 153, 0.5);
+  stroke: rgba(10, 132, 255, 0.55);
   stroke-width: 1.5;
   stroke-dasharray: 6 4;
   fill: none;
@@ -501,7 +887,7 @@ body {
 }
 
 .warp-axis-line {
-  stroke: rgba(99, 179, 237, 0.7);
+  stroke: rgba(41, 151, 255, 0.7);
   stroke-width: 1.5;
   stroke-dasharray: 4 4;
   fill: none;
@@ -523,50 +909,56 @@ body {
 
 .warp-sliders label {
   display: block;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
   margin-bottom: 10px;
+  letter-spacing: -0.005em;
 }
 
 .warp-sliders input[type='range'] {
   width: 100%;
-  accent-color: var(--accent-2);
+  accent-color: var(--accent);
 }
 
 .warp-presets {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   margin: 12px 0;
 }
 
 .warp-presets button {
   flex: 1 1 22%;
-  min-height: 40px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #252528;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 600;
+  min-height: 36px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
 }
 
 .big-btn.full {
   margin-top: 4px;
 }
 
+/* ---------- 导出遮罩 ---------- */
 .mask {
   position: fixed;
   inset: 0;
   z-index: 200;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.78);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  color: #fff;
-  font-size: 15px;
+  gap: 14px;
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: -0.005em;
+  backdrop-filter: blur(12px);
 }
 
 .mask.hidden {
@@ -574,9 +966,9 @@ body {
 }
 
 .spinner {
-  width: 40px;
-  height: 40px;
-  border: 3px solid rgba(255, 255, 255, 0.2);
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(255, 255, 255, 0.18);
   border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
