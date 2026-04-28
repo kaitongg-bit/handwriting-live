@@ -59,6 +59,13 @@
       </label>
       <div class="tpl-list" id="tpl-list" role="listbox" aria-label="海报模板"></div>
       <p class="inline-tip">选模板后单指拖动红框 · 双指缩放旋转</p>
+      <div class="custom-editor hidden" id="custom-editor">
+        <div class="custom-head">
+          <span>自定义圆位</span>
+          <button type="button" class="pill-btn small" id="btn-custom-add">+ 添加圆</button>
+        </div>
+        <div class="custom-list" id="custom-slot-list"></div>
+      </div>
     </div>
 
     <!-- 第 3 步：一字一格 + 田字格（参考字位置大小须在本步完成） -->
@@ -77,28 +84,43 @@
       </div>
     </div>
 
-    <!-- 第 4 步：写字（紧凑条 + 横向笔刷，便于扩展） -->
+    <!-- 第 4 步：写字 -->
     <div class="sheet sheet-draw hidden" id="panel-3">
-      <div class="brush-scroll" id="brush-scroll" role="tablist" aria-label="笔刷"></div>
-      <div class="draw-row-mini">
-        <label class="ico-color" title="颜色"
-          ><input type="color" id="brush-color" value="#1a1a1a"
-        /></label>
-        <input type="range" id="brush-size" class="size-slider" min="2" max="36" value="10" title="粗细" />
-        <label class="replay-label" title="导出回放顺序"
-          >回放
+      <div class="draw-row-brush">
+        <button type="button" class="pill-btn brush-current" id="btn-open-brush-modal" title="选择笔刷与参数">
+          <span class="brush-current-icon" id="brush-current-icon">✒</span>
+          <span class="brush-current-label" id="brush-current-label">顺滑</span>
+          <span class="brush-current-caret">▾</span>
+        </button>
+        <label class="ico-color" title="颜色">
+          <input type="color" id="brush-color" value="#1a1a1a" />
+        </label>
+        <input type="range" id="brush-size" class="size-slider" min="1" max="22" value="4" title="粗细" />
+      </div>
+      <div class="draw-row-replay">
+        <label class="replay-label" title="导出回放顺序">回放
           <select id="replay-mode" class="mini-select">
             <option value="stroke">按笔画</option>
             <option value="char">按字（槽位）</option>
+            <option value="silent">不写直出（按字蹦出）</option>
+          </select>
+        </label>
+        <label class="replay-label" title="出场动画风格">动画
+          <select id="replay-fx" class="mini-select">
+            <option value="dash">描线</option>
+            <option value="drop">掉落</option>
+            <option value="shake">抖动</option>
+            <option value="erase">擦入</option>
           </select>
         </label>
       </div>
       <div class="draw-actions">
         <button type="button" class="pill-btn" id="btn-trace-big" title="全屏照着写；笔迹自动归到对应红圈">大字描写</button>
+        <button type="button" class="pill-btn" id="btn-preview-play" title="按当前回放顺序预览，不导出">预览</button>
         <button type="button" class="pill-btn" id="btn-ref" title="显示或隐藏海报红框参考层">
           参考 <span id="ref-label">开</span>
         </button>
-        <button type="button" class="pill-btn" id="btn-path-edit" title="点选笔画，再用上方颜色/粗细/效果调整">笔画</button>
+        <button type="button" class="pill-btn" id="btn-path-edit" title="点选笔画，再用上方颜色/粗细/效果/笔刷调整">编辑</button>
         <button type="button" class="pill-btn" id="btn-undo" title="撤回上一笔">撤回</button>
       </div>
       <!-- 仅「笔画」模式下出现：选中笔画即时改效果 -->
@@ -186,6 +208,19 @@
         <button type="button" data-p="reset">重置</button>
       </div>
       <button type="button" class="big-btn primary full" id="warp-ok">用到红圈</button>
+    </div>
+  </div>
+
+  <!-- 笔刷选择 + 参数抽屉 -->
+  <div id="brush-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-inner brush-modal-inner">
+      <div class="modal-head">
+        <span>笔刷</span>
+        <button type="button" class="icon-btn" id="brush-modal-close" aria-label="关闭">✕</button>
+      </div>
+      <div class="brush-grid" id="brush-grid" role="listbox" aria-label="选择笔刷"></div>
+      <div class="brush-params" id="brush-params" aria-label="笔刷参数"></div>
+      <button type="button" class="big-btn primary full" id="brush-modal-ok">用这个笔刷</button>
     </div>
   </div>
 

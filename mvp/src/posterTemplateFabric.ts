@@ -72,7 +72,7 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
   });
   const circles = getCircleElements(template);
   const ellipses: fabric.Ellipse[] = [];
-  const labels: fabric.Text[] = [];
+  const labels: (fabric.Text | null)[] = [];
   const centers: { x: number; y: number; rx: number; ry: number }[] = [];
   for (let i = 0; i < circles.length; i++) {
     const el = circles[i];
@@ -88,27 +88,15 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
         ry: ryPx,
         originX: 'center',
         originY: 'center',
-        fill: 'rgba(255,255,255,0.12)',
+        fill: 'rgba(0,0,0,0)',
         stroke: '#e32219',
         strokeDashArray: [5, 4],
         evented: false,
         selectable: false,
       })
     );
-    const fs = Math.max(10, Math.min(rxPx, ryPx) * 1.65);
-    labels.push(
-      new fabric.Text(circledSlotLabel(el.n, i), {
-        left: lx,
-        top: ly,
-        originX: 'center',
-        originY: 'center',
-        fontSize: fs,
-        fontWeight: '900',
-        fill: '#e32219',
-        evented: false,
-        selectable: false,
-      })
-    );
+    /** 画布上的圈内序号会干扰视觉；序号仅保留在槽位按钮里。 */
+    labels.push(null);
     centers.push({ x: lx, y: ly, rx: rxPx, ry: ryPx });
   }
   return { frame, ellipses, labels, centers };

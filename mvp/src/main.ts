@@ -20,14 +20,26 @@ import {
   loadImageForSlot,
   circledSlotLabel,
 } from './posterTemplateFabric';
+import type { PosterTemplate, PosterCircleEl } from './posterTemplateFabric';
 import { BRUSHES, applyBrush, postProcessPath, createNoisePattern } from './brushes';
 import type { BrushId } from './brushes';
+import type { BrushRuntimeOptions } from './brushes';
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 
 let step = 0;
 let canvas: fabric.Canvas;
 let bgImage: fabric.Image | null = null;
 let templateGroup: fabric.Group | null = null;
 let selectedPosterTemplate = POSTER_TEMPLATES[0];
+const baseCustomTemplate = POSTER_TEMPLATES.find((t) => t.id === 'custom');
+let customTemplate: PosterTemplate = baseCustomTemplate
+  ? JSON.parse(JSON.stringify(baseCustomTemplate))
+  : {
+      id: 'custom',
+      name: '自定义',
+      category: 'custom',
+      elements: [],
+    };
 let placement = defaultPlacementForTemplate(selectedPosterTemplate);
 let slotUrls: (string | null)[] = [];
 let refVisible = true;
@@ -49,6 +61,29 @@ const pendingTracePaths: fabric.Object[] = [];
 /** 有邪修图的槽位索引顺序 */
 let traceSlotOrder: number[] = [];
 let traceCursor = 0;
+
+function normalizeCustomTemplate() {
+  const circles = customTemplate.elements.filter((e) => e.type === 'circle') as PosterCircleEl[];
+  if (!circles.length) {
+    customTemplate.elements = [
+      { id: 'custom-c1', type: 'circle', n: '1', cx: 0.32, cy: 0.4, rx: 0.12, ry: 0.12 },
+      { id: 'custom-c2', type: 'circle', n: '2', cx: 0.52, cy: 0.5, rx: 0.12, ry: 0.12 },
+      { id: 'custom-c3', type: 'circle', n: '3', cx: 0.72, cy: 0.4, rx: 0.12, ry: 0.12 },
+      { id: 'custom-c4', type: 'circle', n: '4', cx: 0.5, cy: 0.7, rx: 0.12, ry: 0.12 },
+    ];
+    return;
+  }
+  customTemplate.elements = circles.map((c, i) => ({
+    ...c,
+    id: c.id || `custom-c${i + 1}`,
+    type: 'circle',
+    n: c.n != null && String(c.n).trim() !== '' ? String(c.n) : String(i + 1),
+    cx: Math.max(0.06, Math.min(0.94, Number(c.cx) || 0.5)),
+    cy: Math.max(0.06, Math.min(0.94, Number(c.cy) || 0.5)),
+    rx: Math.max(0.03, Math.min(0.4, Number(c.rx) || 0.1)),
+    ry: Math.max(0.03, Math.min(0.4, Number(c.ry) || 0.1)),
+  }));
+}
 
 const warpState = {
   corners: defaultCorners(),
@@ -115,6 +150,7 @@ function setStep(n: number) {
   }
 
   applyStepMode();
+  renderCustomEditor();
 }
 
 function resizeCanvas() {
@@ -153,7 +189,7 @@ function syncStep4Coach() {
   if (step !== 3 || !hint) return;
   if (traceModalOpen) return;
   hint.textContent = pathEditMode
-    ? '笔画模式：点选已写的笔迹，拖控制点调整。再点「笔画」恢复书写。'
+    ? '编辑模式：点选已写的笔迹，拖控制点调整。再点「编辑」恢复书写。'
     : '本步只写字。参考布局请在第 3 步定好。';
 }
 
@@ -298,11 +334,8 @@ function applyRefOpacity() {
     templateGroup.set({ opacity: 1 });
     return;
   }
-  if (refVisible) {
-    templateGroup.set({ opacity: 0.48 });
-  } else {
-    templateGroup.set({ opacity: 0.14 });
-  }
+  /** 第 4 步：开 = 极淡（不抢戏），关 = 完全不可见 */
+  templateGroup.set({ opacity: refVisible ? 0.28 : 0 });
 }
 
 function ensureBgSolid() {
@@ -379,6 +412,52 @@ function renderTplList() {
   });
 }
 
+function renderCustomEditor() {
+  const host = document.getElementById('custom-editor');
+  const list = document.getElementById('custom-slot-list');
+  if (!host || !list) return;
+  const visible = step === 1 && selectedPosterTemplate.id === 'custom';
+  host.classList.toggle('hidden', !visible);
+  if (!visible) return;
+  normalizeCustomTemplate();
+  const circles = getCircleElements(customTemplate);
+  list.innerHTML = circles
+    .map(
+      (c, i) => `
+      <div class="custom-item" data-idx="${i}">
+        <div class="custom-item-head">
+          <span>圆位 ${i + 1}</span>
+          <button type="button" class="pill-btn warn custom-del" data-idx="${i}">删</button>
+        </div>
+        <div class="custom-grid">
+          <label>名<input data-k="n" data-idx="${i}" value="${String(c.n ?? i + 1)}" /></label>
+          <label>X<input type="range" min="6" max="94" data-k="cx" data-idx="${i}" value="${Math.round(
+            c.cx * 100,
+          )}" /></label>
+          <label>Y<input type="range" min="6" max="94" data-k="cy" data-idx="${i}" value="${Math.round(
+            c.cy * 100,
+          )}" /></label>
+          <label>宽<input type="range" min="3" max="40" data-k="rx" data-idx="${i}" value="${Math.round(
+            c.rx * 100,
+          )}" /></label>
+          <label>高<input type="range" min="3" max="40" data-k="ry" data-idx="${i}" value="${Math.round(
+            c.ry * 100,
+          )}" /></label>
+        </div>
+      </div>`
+    )
+    .join('');
+}
+
+function refreshCustomTemplateOnCanvas() {
+  normalizeCustomTemplate();
+  if (selectedPosterTemplate.id !== 'custom') return;
+  selectedPosterTemplate = customTemplate;
+  syncSlotsForTemplateChange(false);
+  if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
+  renderCustomEditor();
+}
+
 function syncSlotsForTemplateChange(clearUrls: boolean) {
   const n = getCircleElements(selectedPosterTemplate).length;
   if (clearUrls) slotUrls = new Array(n).fill(null);
@@ -443,7 +522,10 @@ function createTemplateGroup(preserveTransform = false) {
   const { cx, cy, gw, gh } = placementBoxPx(placement, cw, ch);
   const { frame, ellipses, labels } = buildPosterTemplateParts(selectedPosterTemplate, gw, gh);
   const parts: fabric.Object[] = [frame];
-  for (let i = 0; i < ellipses.length; i++) parts.push(ellipses[i], labels[i]);
+  for (let i = 0; i < ellipses.length; i++) {
+    parts.push(ellipses[i]);
+    if (labels[i]) parts.push(labels[i] as fabric.Object);
+  }
   const g = new fabric.Group(
     parts,
     fabricGroupOpts({
@@ -492,7 +574,8 @@ function rebuildTemplateWithImages(cb?: () => void) {
           slotFabricImages[i] = im;
           objs.push(im);
         }
-        objs.push(ellipses[i], labels[i]);
+        objs.push(ellipses[i]);
+        if (labels[i]) objs.push(labels[i] as fabric.Object);
       }
       const g = new fabric.Group(objs, fabricGroupOpts({ left, top, scaleX, scaleY, angle }));
       g.setControlsVisibility({ mtr: true });
@@ -568,11 +651,47 @@ function confirmWarp() {
 
 /* ---------- 笔刷 ---------- */
 let brushColor = '#1a1a1a';
-let brushSize = 10;
+let brushSize = 4;
 let brushKind: BrushId = 'pen';
 
+const textBrushState = {
+  pattern: '字墨花风',
+  font: `'Noto Serif SC', 'STSong', serif`,
+  sizeMul: 1.35,
+  gapMul: 1.1,
+  randomAngle: 0.15,
+  randomScale: 0.15,
+};
+const inkBrushState = {
+  pressureEnabled: true,
+  thinning: 0.6,
+  smoothing: 0.5,
+  streamline: 0.55,
+};
+const waveBrushState = { amp: 0.45 };
+const meshBrushState = { density: 1 };
+const roughBrushState = { jitter: 1 };
+
+function brushRuntimeOptions(): BrushRuntimeOptions {
+  return {
+    textPattern: textBrushState.pattern,
+    textFont: textBrushState.font,
+    textSizeMul: textBrushState.sizeMul,
+    textGapMul: textBrushState.gapMul,
+    textRandomAngle: textBrushState.randomAngle,
+    textRandomScale: textBrushState.randomScale,
+    inkPressureEnabled: inkBrushState.pressureEnabled,
+    inkThinning: inkBrushState.thinning,
+    inkSmoothing: inkBrushState.smoothing,
+    inkStreamline: inkBrushState.streamline,
+    waveAmp: waveBrushState.amp,
+    meshDensity: meshBrushState.density,
+    roughJitter: roughBrushState.jitter,
+  };
+}
+
 function updateBrush() {
-  applyBrush(fabric, canvas, brushKind, brushColor, brushSize);
+  applyBrush(fabric, canvas, brushKind, brushColor, brushSize, brushRuntimeOptions());
 }
 
 /* ---------- 「笔画」模式：选中笔画即时改色 / 粗细 / 效果 ---------- */
@@ -581,9 +700,19 @@ function isHollowGroup(o: fabric.Object): boolean {
 }
 
 function applyColorToOne(o: fabric.Object, color: string) {
+  const paintGroupChildren = (g: fabric.Group) => {
+    (g._objects || []).forEach((sub) => {
+      if ((sub as fabric.Path).stroke != null) sub.set({ stroke: color });
+      if (sub.type === 'text' || (sub as fabric.Text).text != null) sub.set({ fill: color });
+    });
+  };
   if (isHollowGroup(o)) {
     const sub = (o as fabric.Group)._objects?.[0];
     if (sub) sub.set({ stroke: color });
+    return;
+  }
+  if ((o as fabric.Group)._objects) {
+    paintGroupChildren(o as fabric.Group);
     return;
   }
   const cur = (o as fabric.Path).stroke;
@@ -606,6 +735,15 @@ function applyColorToSelected(color: string) {
 }
 
 function applyWidthToOne(o: fabric.Object, w: number) {
+  const scaleGroupWidths = (g: fabric.Group) => {
+    (g._objects || []).forEach((sub) => {
+      if ((sub as fabric.Path).strokeWidth != null) {
+        const sw = (sub as fabric.Path).strokeWidth || w;
+        const mul = sw > 0 ? sw / Math.max(1, brushSize) : 1;
+        sub.set({ strokeWidth: Math.max(1, w * mul) });
+      }
+    });
+  };
   if (isHollowGroup(o)) {
     const subs = (o as fabric.Group)._objects;
     if (subs && subs.length >= 2) {
@@ -613,6 +751,10 @@ function applyWidthToOne(o: fabric.Object, w: number) {
       subs[0].set({ strokeWidth: outerW });
       subs[1].set({ strokeWidth: outerW * 0.55 });
     }
+    return;
+  }
+  if ((o as fabric.Group)._objects) {
+    scaleGroupWidths(o as fabric.Group);
     return;
   }
   o.set({ strokeWidth: w });
@@ -672,29 +814,529 @@ function syncEffectRowState() {
 
 function updateTraceBrush() {
   if (!traceCanvas) return;
-  applyBrush(fabric, traceCanvas, brushKind, brushColor, brushSize);
+  applyBrush(fabric, traceCanvas, brushKind, brushColor, brushSize, brushRuntimeOptions());
 }
 
-function populateBrushScroll() {
-  const host = el('brush-scroll');
-  host.innerHTML = '';
-  BRUSHES.forEach((b) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'brush-pill' + (b.id === brushKind ? ' active' : '');
-    btn.dataset.brush = b.id;
-    btn.textContent = b.short;
-    btn.title = b.label;
-    host.appendChild(btn);
-  });
+const BRUSH_ICONS: Record<string, string> = {
+  pen: '✒',
+  pencil: '✏',
+  jitter: '〰',
+  chalk: '🖌',
+  hollow: '◌',
+  soft: '◉',
+  ink: '🖋',
+  dashpen: '┄',
+  wave: '∿',
+  roughpen: '✒',
+  text: '字',
+  mesh: '※',
+};
+
+function brushIcon(id: string): string {
+  return BRUSH_ICONS[id] || '✒';
+}
+
+function brushDef(id: string) {
+  return BRUSHES.find((b) => b.id === id) || BRUSHES[0];
+}
+
+function refreshBrushButton() {
+  const def = brushDef(brushKind);
+  const btn = el('btn-open-brush-modal') as HTMLButtonElement | null;
+  if (!btn) return;
+  const icon = el('brush-current-icon');
+  const label = el('brush-current-label');
+  if (icon) icon.textContent = brushIcon(def.id);
+  if (label) label.textContent = def.short || def.label;
 }
 
 function setBrushKind(id: BrushId) {
   brushKind = id;
-  populateBrushScroll();
+  refreshBrushButton();
   updateBrush();
   updateTraceBrush();
+  /** 「笔画」模式且有选中：把选中笔画整体改成新笔刷的样子（重建 path） */
+  if (step === 3 && pathEditMode) {
+    const objs = canvas.getActiveObjects();
+    if (!objs.length) return;
+    const made: fabric.Object[] = [];
+    objs.forEach((o) => {
+      const n = rebrushOne(o, id, brushColor, brushSize);
+      if (n) made.push(n);
+    });
+    canvas.discardActiveObject();
+    if (made.length === 1) canvas.setActiveObject(made[0]);
+    else if (made.length > 1) {
+      const sel = new fabric.ActiveSelection(made, { canvas });
+      canvas.setActiveObject(sel);
+    }
+    canvas.requestRenderAll();
+    syncEffectRowState();
+  }
 }
+
+/* ---------- 笔刷选择 + 参数抽屉 ---------- */
+type ParamDef =
+  | { kind: 'range'; key: string; label: string; min: number; max: number; step: number; get: () => number; set: (v: number) => void }
+  | { kind: 'text'; key: string; label: string; max: number; get: () => string; set: (v: string) => void }
+  | { kind: 'select'; key: string; label: string; options: { v: string; t: string }[]; get: () => string; set: (v: string) => void };
+
+function brushParams(id: BrushId): ParamDef[] {
+  if (id === 'ink') {
+    return [
+      {
+        kind: 'select',
+        key: 'pressure',
+        label: '压感',
+        options: [
+          { v: 'on', t: '开（速度模拟 + 触控笔压感）' },
+          { v: 'off', t: '关（恒定粗细）' },
+        ],
+        get: () => (inkBrushState.pressureEnabled ? 'on' : 'off'),
+        set: (v) => {
+          inkBrushState.pressureEnabled = v === 'on';
+        },
+      },
+      { kind: 'range', key: 'thinning', label: '细化', min: -0.4, max: 0.95, step: 0.05, get: () => inkBrushState.thinning, set: (v) => (inkBrushState.thinning = v) },
+      { kind: 'range', key: 'smoothing', label: '平滑', min: 0, max: 1, step: 0.05, get: () => inkBrushState.smoothing, set: (v) => (inkBrushState.smoothing = v) },
+      { kind: 'range', key: 'streamline', label: '抖动滤除', min: 0, max: 0.95, step: 0.05, get: () => inkBrushState.streamline, set: (v) => (inkBrushState.streamline = v) },
+    ];
+  }
+  if (id === 'text') {
+    return [
+      { kind: 'text', key: 'pattern', label: '文字内容', max: 24, get: () => textBrushState.pattern, set: (v) => (textBrushState.pattern = v || '字') },
+      {
+        kind: 'select',
+        key: 'font',
+        label: '字体',
+        options: [
+          { v: `'Noto Serif SC', 'STSong', serif`, t: '思源宋（默认）' },
+          { v: `'Noto Sans SC', system-ui, sans-serif`, t: '思源黑' },
+          { v: `'KaiTi', '楷体', serif`, t: '楷体' },
+          { v: `'STKaiti', '楷体', serif`, t: '华文楷体' },
+          { v: `'STFangsong', '仿宋', serif`, t: '仿宋' },
+          { v: `'Ma Shan Zheng', 'KaiTi', cursive`, t: '马善政体（手写）' },
+        ],
+        get: () => textBrushState.font,
+        set: (v) => (textBrushState.font = v),
+      },
+      { kind: 'range', key: 'sizeMul', label: '字号倍率', min: 0.6, max: 2.4, step: 0.05, get: () => textBrushState.sizeMul, set: (v) => (textBrushState.sizeMul = v) },
+      { kind: 'range', key: 'gapMul', label: '间距倍率', min: 0.4, max: 3, step: 0.05, get: () => textBrushState.gapMul, set: (v) => (textBrushState.gapMul = v) },
+      { kind: 'range', key: 'randAng', label: '角度随机', min: 0, max: 1, step: 0.02, get: () => textBrushState.randomAngle, set: (v) => (textBrushState.randomAngle = v) },
+      { kind: 'range', key: 'randSc', label: '大小随机', min: 0, max: 1, step: 0.02, get: () => textBrushState.randomScale, set: (v) => (textBrushState.randomScale = v) },
+    ];
+  }
+  if (id === 'wave') {
+    return [{ kind: 'range', key: 'amp', label: '振幅', min: 0.1, max: 2, step: 0.05, get: () => waveBrushState.amp, set: (v) => (waveBrushState.amp = v) }];
+  }
+  if (id === 'mesh') {
+    return [{ kind: 'range', key: 'density', label: '密度', min: 0.3, max: 2, step: 0.05, get: () => meshBrushState.density, set: (v) => (meshBrushState.density = v) }];
+  }
+  if (id === 'roughpen') {
+    return [{ kind: 'range', key: 'jitter', label: '抖动幅度', min: 0.3, max: 4, step: 0.1, get: () => roughBrushState.jitter, set: (v) => (roughBrushState.jitter = v) }];
+  }
+  return [];
+}
+
+let brushModalDraft: BrushId = 'pen';
+
+function renderBrushParams(id: BrushId) {
+  const host = el('brush-params');
+  if (!host) return;
+  host.innerHTML = '';
+  const defs = brushParams(id);
+  if (!defs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'param-empty';
+    empty.textContent = '此笔刷无额外参数';
+    host.appendChild(empty);
+    return;
+  }
+  defs.forEach((d) => {
+    const row = document.createElement('div');
+    row.className = 'param-row';
+    const label = document.createElement('label');
+    label.textContent = d.label;
+    row.appendChild(label);
+    if (d.kind === 'range') {
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = String(d.min);
+      input.max = String(d.max);
+      input.step = String(d.step);
+      input.value = String(d.get());
+      const val = document.createElement('span');
+      val.style.minWidth = '32px';
+      val.style.textAlign = 'right';
+      val.style.fontSize = '12px';
+      val.style.color = 'var(--muted)';
+      val.textContent = Number(input.value).toFixed(2);
+      input.addEventListener('input', () => {
+        const v = Number(input.value);
+        d.set(v);
+        val.textContent = v.toFixed(2);
+        if (id === brushKind) {
+          updateBrush();
+          updateTraceBrush();
+        }
+      });
+      row.appendChild(input);
+      row.appendChild(val);
+    } else if (d.kind === 'text') {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = d.max;
+      input.value = d.get();
+      input.addEventListener('input', () => {
+        d.set(input.value);
+        if (id === brushKind) {
+          updateBrush();
+          updateTraceBrush();
+        }
+      });
+      row.appendChild(input);
+    } else if (d.kind === 'select') {
+      const sel = document.createElement('select');
+      d.options.forEach((o) => {
+        const opt = document.createElement('option');
+        opt.value = o.v;
+        opt.textContent = o.t;
+        if (o.v === d.get()) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener('change', () => {
+        d.set(sel.value);
+        if (id === brushKind) {
+          updateBrush();
+          updateTraceBrush();
+        }
+      });
+      row.appendChild(sel);
+    }
+    host.appendChild(row);
+  });
+}
+
+function renderBrushGrid() {
+  const host = el('brush-grid');
+  if (!host) return;
+  host.innerHTML = '';
+  BRUSHES.forEach((b) => {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'brush-tile' + (b.id === brushModalDraft ? ' active' : '');
+    tile.dataset.brush = b.id;
+    const icon = document.createElement('span');
+    icon.className = 'brush-tile-icon';
+    icon.textContent = brushIcon(b.id);
+    const label = document.createElement('span');
+    label.textContent = b.short || b.label;
+    tile.appendChild(icon);
+    tile.appendChild(label);
+    tile.addEventListener('click', () => {
+      brushModalDraft = b.id as BrushId;
+      Array.from(host.children).forEach((c) => c.classList.remove('active'));
+      tile.classList.add('active');
+      renderBrushParams(brushModalDraft);
+    });
+    host.appendChild(tile);
+  });
+}
+
+function openBrushModal() {
+  brushModalDraft = brushKind;
+  renderBrushGrid();
+  renderBrushParams(brushModalDraft);
+  el('brush-modal').classList.remove('hidden');
+}
+
+function closeBrushModal() {
+  el('brush-modal').classList.add('hidden');
+}
+
+function setupBrushModal() {
+  el('btn-open-brush-modal').addEventListener('click', openBrushModal);
+  el('brush-modal-close').addEventListener('click', closeBrushModal);
+  el('brush-modal-ok').addEventListener('click', () => {
+    setBrushKind(brushModalDraft);
+    closeBrushModal();
+  });
+  el('brush-modal').addEventListener('click', (e) => {
+    if (e.target === el('brush-modal')) closeBrushModal();
+  });
+}
+
+/** 提取 path data（支持 hollow group 与普通 path），深拷贝防破坏 */
+function extractPathData(o: fabric.Object): unknown[] | null {
+  const src = isHollowGroup(o)
+    ? ((o as fabric.Group)._objects?.[0] as fabric.Path | undefined)?.path
+    : (o as fabric.Path).path;
+  if (!Array.isArray(src)) return null;
+  return src.map((c) => (Array.isArray(c) ? [...c] : c));
+}
+
+/** 把现有笔画整体改成 brushId 对应的笔刷外观 / 形态。保留位置与变换。 */
+function rebrushOne(
+  o: fabric.Object,
+  brushId: BrushId,
+  color: string,
+  baseW: number
+): fabric.Object | null {
+  const data = extractPathData(o);
+  if (!data) return null;
+
+  const transform = {
+    left: o.left,
+    top: o.top,
+    scaleX: o.scaleX,
+    scaleY: o.scaleY,
+    angle: o.angle,
+    originX: o.originX,
+    originY: o.originY,
+    selectable: o.selectable,
+    evented: true,
+    strokeUniform: true,
+  };
+  const meta = {
+    customEffect: (o as fabric.Object & { customEffect?: string }).customEffect,
+    __slotIndex: (o as fabric.Object & { __slotIndex?: number }).__slotIndex,
+  };
+
+  const widthMul: Record<string, number> = {
+    pen: 1,
+    pencil: 1.35,
+    jitter: 1.5,
+    chalk: 2.2,
+    hollow: 2.2,
+    soft: 1.2,
+    ink: 1.35,
+    dashpen: 1.1,
+    wave: 1.05,
+    roughpen: 1.15,
+    text: 1.1,
+    mesh: 0.95,
+  };
+  const sw = baseW * (widthMul[brushId] ?? 1);
+  const usePattern = brushId === 'pencil' || brushId === 'chalk';
+  const stroke = usePattern ? createNoisePattern(fabric, color) : color;
+
+  let next: fabric.Object;
+  const mkPath = (d: unknown[], extra: Record<string, unknown> = {}) =>
+    new fabric.Path(d as never, {
+      fill: null,
+      stroke,
+      strokeWidth: sw,
+      strokeLineCap: 'round',
+      strokeLineJoin: 'round',
+      ...extra,
+    });
+  const toPts = (d: Array<Array<string | number>>) => {
+    const pts: Array<{ x: number; y: number }> = [];
+    d.forEach((cmd) => {
+      if (cmd[0] === 'M' || cmd[0] === 'L') pts.push({ x: Number(cmd[1]) || 0, y: Number(cmd[2]) || 0 });
+      else if (cmd[0] === 'Q') pts.push({ x: Number(cmd[3]) || 0, y: Number(cmd[4]) || 0 });
+      else if (cmd[0] === 'C') pts.push({ x: Number(cmd[5]) || 0, y: Number(cmd[6]) || 0 });
+    });
+    return pts;
+  };
+  const jittered = (d: Array<Array<string | number>>, amp: number) =>
+    d.map((cmd) => {
+      const c = [...cmd];
+      if (c[0] === 'Q') {
+        c[1] = (c[1] as number) + (Math.random() - 0.5) * amp;
+        c[2] = (c[2] as number) + (Math.random() - 0.5) * amp;
+        c[3] = (c[3] as number) + (Math.random() - 0.5) * amp;
+        c[4] = (c[4] as number) + (Math.random() - 0.5) * amp;
+      } else if (c[0] === 'L' || c[0] === 'M') {
+        c[1] = (c[1] as number) + (Math.random() - 0.5) * amp;
+        c[2] = (c[2] as number) + (Math.random() - 0.5) * amp;
+      } else if (c[0] === 'C') {
+        for (let i = 1; i <= 6; i++) c[i] = (c[i] as number) + (Math.random() - 0.5) * amp;
+      }
+      return c;
+    });
+  if (brushId === 'jitter') {
+    const d = data as Array<Array<string | number>>;
+    for (const cmd of d) {
+      if (cmd[0] === 'Q') {
+        cmd[1] = (cmd[1] as number) + (Math.random() - 0.5) * 5;
+        cmd[2] = (cmd[2] as number) + (Math.random() - 0.5) * 5;
+        cmd[3] = (cmd[3] as number) + (Math.random() - 0.5) * 5;
+        cmd[4] = (cmd[4] as number) + (Math.random() - 0.5) * 5;
+      } else if (cmd[0] === 'L') {
+        cmd[1] = (cmd[1] as number) + (Math.random() - 0.5) * 5;
+        cmd[2] = (cmd[2] as number) + (Math.random() - 0.5) * 5;
+      }
+    }
+    next = mkPath(d as unknown[]);
+  } else if (brushId === 'wave') {
+    const d = data as Array<Array<string | number>>;
+    const w = d.map((cmd, idx) => {
+      const c = [...cmd];
+      const shift = Math.sin(idx * 0.8) * (sw * 0.45);
+      if (c[0] === 'Q') {
+        c[2] = (c[2] as number) + shift;
+        c[4] = (c[4] as number) + shift;
+      } else if (c[0] === 'L' || c[0] === 'M') {
+        c[2] = (c[2] as number) + shift;
+      } else if (c[0] === 'C') {
+        c[2] = (c[2] as number) + shift;
+        c[4] = (c[4] as number) + shift;
+        c[6] = (c[6] as number) + shift;
+      }
+      return c;
+    });
+    next = mkPath(w as unknown[]);
+  } else if (brushId === 'dashpen') {
+    next = mkPath(data, { strokeDashArray: [sw * 1.8, sw * 1.2] });
+  } else if (brushId === 'roughpen') {
+    const d = data as Array<Array<string | number>>;
+    const p1 = mkPath(jittered(d, 2.8) as unknown[], { opacity: 0.95, strokeUniform: true });
+    const p2 = mkPath(jittered(d, 4.3) as unknown[], {
+      opacity: 0.4,
+      strokeWidth: sw * 0.7,
+      strokeUniform: true,
+    });
+    next = new fabric.Group([p1, p2], { isRough: true, strokeUniform: true });
+  } else if (brushId === 'ink') {
+    const d = data as Array<Array<string | number>>;
+    const base = mkPath(d as unknown[], { stroke: color, strokeWidth: sw * 0.95, strokeUniform: true });
+    const bloom = mkPath(d as unknown[], {
+      stroke: color,
+      opacity: 0.32,
+      strokeWidth: sw * 1.7,
+      strokeUniform: true,
+      shadow: new fabric.Shadow({ color, blur: 2, offsetX: 0, offsetY: 0 }),
+    });
+    const pts = toPts(d);
+    const dots: fabric.Object[] = [];
+    if (pts[0]) {
+      dots.push(
+        new fabric.Circle({
+          left: pts[0].x,
+          top: pts[0].y,
+          originX: 'center',
+          originY: 'center',
+          radius: Math.max(1, sw * 0.36),
+          fill: color,
+          opacity: 0.85,
+        }),
+      );
+    }
+    if (pts[pts.length - 1]) {
+      dots.push(
+        new fabric.Circle({
+          left: pts[pts.length - 1].x,
+          top: pts[pts.length - 1].y,
+          originX: 'center',
+          originY: 'center',
+          radius: Math.max(1, sw * 0.42),
+          fill: color,
+          opacity: 0.9,
+        }),
+      );
+    }
+    next = new fabric.Group([bloom, base, ...dots], { isInk: true, strokeUniform: true });
+  } else if (brushId === 'text') {
+    const pts = toPts(data as Array<Array<string | number>>);
+    const pattern = (textBrushState.pattern || '字墨花风').replace(/\s+/g, '');
+    const chars = [...pattern];
+    if (!chars.length) chars.push('字');
+    const step = Math.max(2, Math.floor(sw * 1.1));
+    const glyphs: fabric.Object[] = [];
+    for (let i = 0; i < pts.length; i += step) {
+      const cur = pts[i];
+      const nxt = pts[Math.min(pts.length - 1, i + 1)] || cur;
+      const ang = (Math.atan2(nxt.y - cur.y, nxt.x - cur.x) * 180) / Math.PI;
+      glyphs.push(
+        new fabric.Text(chars[Math.floor(i / step) % chars.length], {
+          left: cur.x,
+          top: cur.y,
+          angle: ang,
+          originX: 'center',
+          originY: 'center',
+          fontSize: Math.max(10, sw * 1.35),
+          fill: color,
+          fontFamily: `'Noto Serif SC', 'STSong', serif`,
+          opacity: 0.9,
+        }),
+      );
+    }
+    next = new fabric.Group(glyphs, { isTextBrush: true, strokeUniform: true });
+  } else if (brushId === 'mesh') {
+    const d = data as Array<Array<string | number>>;
+    const pts = toPts(d);
+    const lines: fabric.Object[] = [];
+    for (let i = 0; i + 3 < pts.length; i += 3) {
+      const a = pts[i];
+      const b = pts[Math.min(pts.length - 1, i + 3)];
+      lines.push(
+        new fabric.Line([a.x, a.y, b.x, b.y], {
+          stroke: color,
+          strokeWidth: Math.max(1, sw * 0.38),
+          opacity: 0.45,
+        }),
+      );
+      if (i + 6 < pts.length) {
+        const c = pts[i + 6];
+        lines.push(
+          new fabric.Line([a.x, a.y, c.x, c.y], {
+            stroke: color,
+            strokeWidth: Math.max(1, sw * 0.3),
+            opacity: 0.32,
+          }),
+        );
+      }
+    }
+    const base = mkPath(d as unknown[], { stroke: color, strokeWidth: sw * 0.7, opacity: 0.88, strokeUniform: true });
+    next = new fabric.Group([base, ...lines], { isMesh: true, strokeUniform: true });
+  } else if (brushId === 'hollow') {
+    const outer = new fabric.Path(data as never, {
+      fill: null,
+      stroke: color,
+      strokeWidth: sw,
+      strokeLineCap: 'round',
+      strokeLineJoin: 'round',
+      strokeUniform: true,
+    });
+    const inner = new fabric.Path(data as never, {
+      fill: null,
+      stroke: '#f4f1ea',
+      strokeWidth: sw * 0.55,
+      strokeLineCap: 'round',
+      strokeLineJoin: 'round',
+      strokeUniform: true,
+      globalCompositeOperation: 'destination-out',
+    });
+    next = new fabric.Group([outer, inner], { isHollow: true, strokeUniform: true });
+  } else {
+    next = mkPath(data);
+    if (brushId === 'pencil' || brushId === 'chalk') (next as fabric.Path).set({ opacity: 0.88 });
+    if (brushId === 'soft')
+      (next as fabric.Path).set({
+        shadow: new fabric.Shadow({ color, blur: 3, offsetX: 0, offsetY: 0 }),
+      });
+  }
+
+  next.set(transform);
+  if ((next as fabric.Group)._objects) {
+    (next as fabric.Group)._objects.forEach((sub: fabric.Object) =>
+      sub.set({ strokeUniform: true })
+    );
+  }
+  Object.assign(next, meta);
+
+  const idx = drawHistory.indexOf(o);
+  canvas.remove(o);
+  canvas.add(next);
+  if (idx >= 0) drawHistory[idx] = next;
+  if (meta.customEffect && meta.customEffect !== 'none') {
+    applyEffectToOne(next, meta.customEffect as 'none' | 'neon' | 'emboss' | 'knockout');
+  }
+  return next;
+}
+
+type ReplayFx = 'dash' | 'drop' | 'shake' | 'erase';
 
 function dashAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
   return new Promise((resolve) => {
@@ -742,52 +1384,308 @@ function dashAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
   });
 }
 
-async function runExportPlayback(paths: fabric.Object[]) {
-  const replay = (el('replay-mode') as HTMLSelectElement).value;
-  const dur = paths.length > 10 ? 120 : 280;
-  const pause = paths.length > 10 ? 12 : 36;
-  if (replay === 'char') {
+function dropAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
+  return new Promise((resolve) => {
+    const top0 = obj.top ?? 0;
+    const sx = obj.scaleX || 1;
+    const sy = obj.scaleY || 1;
+    obj.set({ opacity: 0, top: top0 - 36, scaleX: sx * 0.9, scaleY: sy * 0.9 });
+    obj.animate('opacity', 1, { duration: Math.floor(dur * 0.5), onChange: () => canvas.renderAll() });
+    obj.animate('top', top0, {
+      duration: dur,
+      easing: fabric.util.ease.easeOutBack,
+      onChange: () => canvas.renderAll(),
+    });
+    obj.animate('scaleX', sx, { duration: dur, easing: fabric.util.ease.easeOutBack });
+    obj.animate('scaleY', sy, {
+      duration: dur,
+      easing: fabric.util.ease.easeOutBack,
+      onChange: () => canvas.renderAll(),
+      onComplete: () => resolve(),
+    });
+  });
+}
+
+function shakeAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
+  return new Promise((resolve) => {
+    const left0 = obj.left ?? 0;
+    const amp = Math.max(3, Math.min(10, (obj.strokeWidth as number) || 6));
+    obj.set({ opacity: 0 });
+    obj.animate('opacity', 1, { duration: 120, onChange: () => canvas.renderAll() });
+    fabric.util.animate({
+      startValue: 0,
+      endValue: 1,
+      duration: dur,
+      easing: fabric.util.ease.easeOutSine,
+      onChange: (t: number) => {
+        const decay = 1 - t;
+        obj.set({ left: left0 + Math.sin(t * 16 * Math.PI) * amp * decay });
+        canvas.renderAll();
+      },
+      onComplete: () => {
+        obj.set({ left: left0 });
+        canvas.renderAll();
+        resolve();
+      },
+    });
+  });
+}
+
+function eraseInAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
+  return new Promise((resolve) => {
+    const b = obj.getBoundingRect(true, true);
+    const clip = new fabric.Rect({
+      left: b.left,
+      top: b.top,
+      width: 0.5,
+      height: b.height + 2,
+      absolutePositioned: true,
+      originX: 'left',
+      originY: 'top',
+    });
+    obj.set({ opacity: 1, clipPath: clip });
+    clip.animate('width', b.width + 2, {
+      duration: dur,
+      easing: fabric.util.ease.easeOutSine,
+      onChange: () => canvas.renderAll(),
+      onComplete: () => {
+        obj.set({ clipPath: undefined });
+        canvas.renderAll();
+        resolve();
+      },
+    });
+  });
+}
+
+function animateObjectByFx(obj: fabric.Object, dur: number, fx: ReplayFx): Promise<void> {
+  if (fx === 'drop') return dropAnimateObject(obj, dur);
+  if (fx === 'shake') return shakeAnimateObject(obj, dur);
+  if (fx === 'erase') return eraseInAnimateObject(obj, dur);
+  return dashAnimateObject(obj, dur);
+}
+
+/** Live Photo 风格：整段约 3 秒；按笔画/按字均分。stroke/char 模式下用 dash 动画。 */
+const LIVE_TARGET_MS = 3200;
+
+async function runExportPlayback(
+  paths: fabric.Object[],
+  mode: 'stroke' | 'char' = 'stroke',
+  fx: ReplayFx = 'dash'
+) {
+  if (mode === 'char') {
     const bucket = new Map<number, fabric.Object[]>();
     for (const p of paths) {
       const k = (p as fabric.Object & { __slotIndex?: number }).__slotIndex;
       const key = k != null ? k : 998;
       if (!bucket.has(key)) bucket.set(key, []);
-      bucket.get(key).push(p);
+      bucket.get(key)!.push(p);
     }
     const keys = [...bucket.keys()].sort((a, b) => a - b);
+    const n = Math.max(1, keys.length);
+    const dur = Math.max(220, Math.min(800, Math.floor(LIVE_TARGET_MS / n) - 60));
+    const pause = Math.max(40, Math.floor((LIVE_TARGET_MS - dur * n) / Math.max(1, n - 1)));
     for (const k of keys) {
       const grp = bucket.get(k)!;
-      await Promise.all(grp.map((o) => dashAnimateObject(o, dur)));
+      await Promise.all(grp.map((o) => animateObjectByFx(o, dur, fx)));
       await new Promise((r) => setTimeout(r, pause));
     }
     return;
   }
+  const n = Math.max(1, paths.length);
+  const dur = Math.max(80, Math.min(600, Math.floor(LIVE_TARGET_MS / n) - 20));
+  const pause = Math.max(8, Math.floor((LIVE_TARGET_MS - dur * n) / Math.max(1, n - 1)));
   for (const p of paths) {
     if (!canvas.getObjects().includes(p)) continue;
-    await dashAnimateObject(p, dur);
+    await animateObjectByFx(p, dur, fx);
     await new Promise((r) => setTimeout(r, pause));
   }
 }
 
+/** 不写直出：把第 3 步的字图按槽位顺序逐个 fade-in + scale-in，整段≈3s */
+async function runSilentPopIn() {
+  const ordered = slotFabricImages
+    .map((im, i) => ({ im, i }))
+    .filter((x) => !!x.im && !!slotUrls[x.i]) as { im: fabric.Image; i: number }[];
+  if (!ordered.length) return;
+  const n = ordered.length;
+  const dur = Math.max(280, Math.min(900, Math.floor(LIVE_TARGET_MS / n) - 80));
+  const pause = Math.max(60, Math.floor((LIVE_TARGET_MS - dur * n) / Math.max(1, n - 1)));
+  for (const { im } of ordered) {
+    const sx = im.scaleX || 1;
+    const sy = im.scaleY || 1;
+    im.set({ scaleX: sx * 0.82, scaleY: sy * 0.82, opacity: 0 });
+    await new Promise<void>((resolve) => {
+      im.animate('opacity', 1, {
+        duration: Math.floor(dur * 0.6),
+        onChange: () => canvas.renderAll(),
+      });
+      im.animate('scaleX', sx, {
+        duration: dur,
+        easing: fabric.util.ease.easeOutBack,
+        onChange: () => canvas.renderAll(),
+      });
+      im.animate('scaleY', sy, {
+        duration: dur,
+        easing: fabric.util.ease.easeOutBack,
+        onChange: () => canvas.renderAll(),
+        onComplete: () => setTimeout(resolve, pause),
+      });
+    });
+  }
+}
+
+/* ---------- 视频编码（WebCodecs + mp4-muxer，苹果相册友好的 H.264 MP4） ---------- */
+function isWebCodecsAvailable(): boolean {
+  return (
+    typeof (window as any).VideoEncoder !== 'undefined' &&
+    typeof (window as any).VideoFrame !== 'undefined'
+  );
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 800);
+}
+
+/** 用 WebCodecs 把 srcCanvas 在 runAnim 跑动期间逐帧编码成 H.264，
+ *  再用 mp4-muxer 合到非 fragmented MP4（moov 在头部）。
+ *  iOS 相册 / QuickTime / 微信全部直接识别。 */
+async function encodeWithWebCodecs(
+  srcCanvas: HTMLCanvasElement,
+  runAnim: () => Promise<void>,
+): Promise<Blob> {
+  const fps = 30;
+  const w = srcCanvas.width;
+  const h = srcCanvas.height;
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width: w, height: h, frameRate: fps },
+    fastStart: 'in-memory',
+    firstTimestampBehavior: 'offset',
+  });
+
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta as any),
+    error: (e) => console.error('[VideoEncoder]', e),
+  });
+
+  /** 优先 baseline → main → high；都尝试 avcc 再试默认 */
+  const profiles = ['avc1.42E01F', 'avc1.4D401F', 'avc1.640028'];
+  let configured = false;
+  for (const codec of profiles) {
+    for (const avcFmt of ['avc', undefined] as const) {
+      const cfg: any = {
+        codec,
+        width: w,
+        height: h,
+        framerate: fps,
+        bitrate: 4_500_000,
+        bitrateMode: 'variable',
+      };
+      if (avcFmt) cfg.avc = { format: avcFmt };
+      try {
+        const support = await (VideoEncoder as any).isConfigSupported(cfg);
+        if (support && support.supported) {
+          encoder.configure(support.config || cfg);
+          configured = true;
+          break;
+        }
+      } catch (_) {}
+    }
+    if (configured) break;
+  }
+  if (!configured) {
+    encoder.close();
+    throw new Error('No supported H.264 config in this browser');
+  }
+
+  let frameIdx = 0;
+  let stopped = false;
+  const grabFrame = () => {
+    if (stopped) return;
+    const ts = Math.round((frameIdx * 1_000_000) / fps);
+    try {
+      const vf = new VideoFrame(srcCanvas, { timestamp: ts });
+      const isKey = frameIdx % fps === 0;
+      encoder.encode(vf, { keyFrame: isKey });
+      vf.close();
+      frameIdx++;
+    } catch (e) {
+      console.warn('[VideoFrame] encode failed', e);
+    }
+  };
+  const interval = setInterval(grabFrame, 1000 / fps);
+
+  try {
+    await runAnim();
+  } finally {
+    stopped = true;
+    clearInterval(interval);
+  }
+
+  /** 多吸两帧让最后一画的尾巴稳定 */
+  for (let i = 0; i < 6; i++) grabFrame();
+
+  await encoder.flush();
+  encoder.close();
+  muxer.finalize();
+
+  const ab = (muxer.target as ArrayBufferTarget).buffer;
+  return new Blob([ab], { type: 'video/mp4' });
+}
+
 /* ---------- 导出视频 ---------- */
 async function exportVideo() {
-  if (drawHistory.length === 0) {
-    toast('请先写几笔再导出');
+  const replay = (el('replay-mode') as HTMLSelectElement).value as 'stroke' | 'char' | 'silent';
+  const fx = (el('replay-fx') as HTMLSelectElement).value as ReplayFx;
+  const isSilent = replay === 'silent';
+  if (!isSilent && drawHistory.length === 0) {
+    toast('请先写几笔，或在「回放」里选择「不写直出」');
+    return;
+  }
+  if (isSilent && !slotUrls.some((u) => !!u)) {
+    toast('请先在第 3 步生成至少一个参考字');
     return;
   }
   el('export-mask').classList.remove('hidden');
+  const maskMsg = el('export-mask').querySelector('p');
+  if (maskMsg) maskMsg.textContent = '正在合成视频…';
   canvas.discardActiveObject();
   canvas.isDrawingMode = false;
   const tgSave = templateGroup ? templateGroup.opacity : 1;
-  if (templateGroup) templateGroup.set({ opacity: 0 });
-  const paths = drawHistory.filter((p) => canvas.getObjects().includes(p));
-  paths.forEach((p) => p.set({ opacity: 0 }));
+
+  /** silent: 字图作为顶层独立对象 fade-in，红框/编号 全藏；
+   *  非 silent: 整模板（红框+字图）藏掉，仅显示用户笔画 */
+  let savedScales: Array<{ im: fabric.Image; sx: number; sy: number; op: number }> = [];
+  let paths: fabric.Object[] = [];
+  if (isSilent) {
+    detachSlotImagesFromGroup();
+    if (templateGroup) templateGroup.set({ opacity: 0 });
+    savedScales = slotFabricImages
+      .filter((im): im is fabric.Image => !!im)
+      .map((im) => ({ im, sx: im.scaleX || 1, sy: im.scaleY || 1, op: im.opacity ?? 1 }));
+    savedScales.forEach((s) => s.im.set({ opacity: 0 }));
+  } else {
+    if (templateGroup) templateGroup.set({ opacity: 0 });
+    paths = drawHistory.filter((p) => canvas.getObjects().includes(p));
+    paths.forEach((p) => p.set({ opacity: 0 }));
+  }
   canvas.renderAll();
 
   const sourceCanvas = canvas.lowerCanvasEl;
   const streamCanvas = document.createElement('canvas');
-  streamCanvas.width = sourceCanvas.width;
-  streamCanvas.height = sourceCanvas.height;
+  /** H.264 要求偶数尺寸 */
+  streamCanvas.width = sourceCanvas.width - (sourceCanvas.width % 2);
+  streamCanvas.height = sourceCanvas.height - (sourceCanvas.height % 2);
   const sctx = streamCanvas.getContext('2d')!;
   const dpr = window.devicePixelRatio || 1;
 
@@ -804,46 +1702,126 @@ async function exportVideo() {
   };
   tickStream();
 
-  let mime = '';
-  if (MediaRecorder.isTypeSupported('video/mp4')) mime = 'video/mp4';
-  else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mime = 'video/webm;codecs=vp9';
-  else if (MediaRecorder.isTypeSupported('video/webm')) mime = 'video/webm';
-
-  let recorder: MediaRecorder | null = null;
-  const chunks: Blob[] = [];
-  if (mime) {
-    const stream = streamCanvas.captureStream(30);
-    recorder = new MediaRecorder(stream, { mimeType: mime });
-    recorder.ondataavailable = (e) => {
-      if (e.data.size) chunks.push(e.data);
-    };
-    recorder.start();
+  /** 导出主路径：WebCodecs + mp4-muxer → 标准非 fragmented MP4（H.264）；
+   *  iOS 相册 / QuickTime / 微信都直接吃。Safari < 17 无 WebCodecs，回退 MediaRecorder。 */
+  const useWebCodecs = isWebCodecsAvailable();
+  let exported = false;
+  if (useWebCodecs) {
+    try {
+      const blob = await encodeWithWebCodecs(streamCanvas, async () => {
+        if (isSilent) await runSilentPopIn();
+        else await runExportPlayback(paths, replay === 'char' ? 'char' : 'stroke', fx);
+      });
+      anim = false;
+      downloadBlob(blob, `手写Live_${Date.now()}.mp4`);
+      toast('已保存到下载（苹果相册可直接存）');
+      exported = true;
+    } catch (e) {
+      console.warn('[export] WebCodecs path failed, fallback to MediaRecorder', e);
+    }
   }
 
-  await runExportPlayback(paths);
+  if (!exported) {
+    let mime = '';
+    if (MediaRecorder.isTypeSupported('video/mp4')) mime = 'video/mp4';
+    else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mime = 'video/webm;codecs=vp9';
+    else if (MediaRecorder.isTypeSupported('video/webm')) mime = 'video/webm';
 
-  anim = false;
-  await new Promise((r) => setTimeout(r, 400));
-  if (recorder && recorder.state !== 'inactive') recorder.stop();
-  await new Promise((r) => setTimeout(r, 200));
+    let recorder: MediaRecorder | null = null;
+    const chunks: Blob[] = [];
+    if (mime) {
+      const stream = streamCanvas.captureStream(30);
+      recorder = new MediaRecorder(stream, { mimeType: mime });
+      recorder.ondataavailable = (e) => {
+        if (e.data.size) chunks.push(e.data);
+      };
+      recorder.start();
+    }
 
-  if (mime && chunks.length) {
-    const blob = new Blob(chunks, { type: mime });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `手写Live_${Date.now()}.${mime.includes('mp4') ? 'mp4' : 'webm'}`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 500);
-    toast('视频已保存到下载');
+    if (isSilent) {
+      await runSilentPopIn();
+    } else {
+      await runExportPlayback(paths, replay === 'char' ? 'char' : 'stroke', fx);
+    }
+    anim = false;
+    await new Promise((r) => setTimeout(r, 400));
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    await new Promise((r) => setTimeout(r, 200));
+
+    if (mime && chunks.length) {
+      const blob = new Blob(chunks, { type: mime });
+      const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+      downloadBlob(blob, `手写Live_${Date.now()}.${ext}`);
+      toast(
+        ext === 'webm'
+          ? '已保存为 WebM。苹果设备建议升级 Safari 17+ 后再导出 MP4'
+          : '已保存到下载',
+      );
+    } else {
+      toast('本机不支持录制，请换 Chrome / Edge 或升级 Safari 17+');
+    }
+  }
+
+  if (isSilent) {
+    savedScales.forEach((s) => s.im.set({ scaleX: s.sx, scaleY: s.sy, opacity: s.op }));
+    attachSlotImagesToGroup();
   } else {
-    toast('本机不支持录制，请换 Chrome / Edge 试试');
+    paths.forEach((p) => p.set({ opacity: 1 }));
   }
-
-  paths.forEach((p) => p.set({ opacity: 1 }));
   if (templateGroup) templateGroup.set({ opacity: tgSave });
   el('export-mask').classList.add('hidden');
   applyStepMode();
   canvas.renderAll();
+}
+
+/** 「预览」：跑一遍回放动画但不录制不导出，让用户先看效果 */
+async function runPreview() {
+  const replay = (el('replay-mode') as HTMLSelectElement).value as 'stroke' | 'char' | 'silent';
+  const fx = (el('replay-fx') as HTMLSelectElement).value as ReplayFx;
+  const isSilent = replay === 'silent';
+  if (!isSilent && drawHistory.length === 0) {
+    toast('还没有可预览的笔画；可在「回放」选「不写直出」');
+    return;
+  }
+  if (isSilent && !slotUrls.some((u) => !!u)) {
+    toast('请先在第 3 步生成至少一个参考字');
+    return;
+  }
+  canvas.discardActiveObject();
+  const wasDrawing = canvas.isDrawingMode;
+  canvas.isDrawingMode = false;
+  const tgSave = templateGroup ? templateGroup.opacity : 1;
+
+  let savedScales: Array<{ im: fabric.Image; sx: number; sy: number; op: number }> = [];
+  let paths: fabric.Object[] = [];
+  if (isSilent) {
+    detachSlotImagesFromGroup();
+    if (templateGroup) templateGroup.set({ opacity: 0 });
+    savedScales = slotFabricImages
+      .filter((im): im is fabric.Image => !!im)
+      .map((im) => ({ im, sx: im.scaleX || 1, sy: im.scaleY || 1, op: im.opacity ?? 1 }));
+    savedScales.forEach((s) => s.im.set({ opacity: 0 }));
+  } else {
+    if (templateGroup) templateGroup.set({ opacity: 0 });
+    paths = drawHistory.filter((p) => canvas.getObjects().includes(p));
+    paths.forEach((p) => p.set({ opacity: 0 }));
+  }
+  canvas.renderAll();
+
+  if (isSilent) await runSilentPopIn();
+  else await runExportPlayback(paths, replay === 'char' ? 'char' : 'stroke', fx);
+
+  if (isSilent) {
+    savedScales.forEach((s) => s.im.set({ scaleX: s.sx, scaleY: s.sy, opacity: s.op }));
+    attachSlotImagesToGroup();
+  } else {
+    paths.forEach((p) => p.set({ opacity: 1 }));
+  }
+  if (templateGroup) templateGroup.set({ opacity: tgSave });
+  canvas.isDrawingMode = wasDrawing;
+  applyStepMode();
+  canvas.renderAll();
+  toast('预览结束');
 }
 
 /* ---------- 大字描写 ---------- */
@@ -856,7 +1834,7 @@ function initTraceCanvas() {
   traceCanvas.on('path:created', (e: { path?: fabric.Object }) => {
     let p = e.path;
     if (!p) return;
-    p = postProcessPath(fabric, traceCanvas, p, brushKind, brushColor);
+    p = postProcessPath(fabric, traceCanvas, p, brushKind, brushColor, brushRuntimeOptions());
     /** strokeUniform: 之后在 flush 时整体 scale，stroke 不会跟随变细 → 粗细一致 */
     p.set({ selectable: false, evented: true, strokeUniform: true });
     if ((p as fabric.Group)._objects) {
@@ -1128,6 +2106,7 @@ function setupCanvasZoomPan() {
 
 /* ---------- 初始化 ---------- */
 function init() {
+  normalizeCustomTemplate();
   canvas = new fabric.Canvas('main', {
     isDrawingMode: false,
     selection: true,
@@ -1141,7 +2120,7 @@ function init() {
     if (traceModalOpen) return;
     let p = e.path;
     if (!p) return;
-    p = postProcessPath(fabric, canvas, p, brushKind, brushColor);
+    p = postProcessPath(fabric, canvas, p, brushKind, brushColor, brushRuntimeOptions());
     p.set({
       selectable: step === 3 && pathEditMode,
       evented: true,
@@ -1196,12 +2175,14 @@ function init() {
   el('tpl-category').addEventListener('change', () => {
     const items = filteredTemplates();
     if (!items.some((t) => t.id === selectedPosterTemplate.id)) {
-      selectedPosterTemplate = items[0] || POSTER_TEMPLATES[0];
+      const next = items[0] || POSTER_TEMPLATES[0];
+      selectedPosterTemplate = next.id === 'custom' ? customTemplate : next;
       placement = defaultPlacementForTemplate(selectedPosterTemplate);
       syncSlotsForTemplateChange(true);
       if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
     }
     renderTplList();
+    renderCustomEditor();
   });
 
   el('tpl-list').addEventListener('click', (ev) => {
@@ -1209,11 +2190,59 @@ function init() {
     if (!b?.dataset.tid) return;
     const t = POSTER_TEMPLATES.find((x) => x.id === b.dataset.tid);
     if (!t || t.id === selectedPosterTemplate.id) return;
-    selectedPosterTemplate = t;
+    selectedPosterTemplate = t.id === 'custom' ? customTemplate : t;
     placement = defaultPlacementForTemplate(selectedPosterTemplate);
     syncSlotsForTemplateChange(true);
     if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
     renderTplList();
+    renderCustomEditor();
+  });
+
+  el('btn-custom-add').addEventListener('click', () => {
+    if (selectedPosterTemplate.id !== 'custom') return;
+    const circles = getCircleElements(customTemplate);
+    const k = circles.length + 1;
+    customTemplate.elements.push({
+      id: `custom-c${Date.now()}-${k}`,
+      type: 'circle',
+      n: String(k),
+      cx: 0.5 + ((k % 2 === 0 ? 1 : -1) * 0.08),
+      cy: 0.5 + ((k % 3 === 0 ? 1 : -1) * 0.06),
+      rx: 0.11,
+      ry: 0.11,
+    } as PosterCircleEl);
+    refreshCustomTemplateOnCanvas();
+  });
+
+  el('custom-slot-list').addEventListener('click', (ev) => {
+    const btn = (ev.target as HTMLElement).closest('.custom-del') as HTMLButtonElement | null;
+    if (!btn?.dataset.idx) return;
+    const idx = Number(btn.dataset.idx);
+    const circles = getCircleElements(customTemplate);
+    if (circles.length <= 1) {
+      toast('至少保留一个圆位');
+      return;
+    }
+    circles.splice(idx, 1);
+    customTemplate.elements = circles as PosterCircleEl[];
+    refreshCustomTemplateOnCanvas();
+  });
+
+  el('custom-slot-list').addEventListener('input', (ev) => {
+    const input = ev.target as HTMLInputElement;
+    const idx = Number(input.dataset.idx);
+    const key = input.dataset.k;
+    if (!Number.isFinite(idx) || !key) return;
+    const circles = getCircleElements(customTemplate) as PosterCircleEl[];
+    const c = circles[idx];
+    if (!c) return;
+    if (key === 'n') c.n = input.value.trim() || String(idx + 1);
+    if (key === 'cx') c.cx = Number(input.value) / 100;
+    if (key === 'cy') c.cy = Number(input.value) / 100;
+    if (key === 'rx') c.rx = Number(input.value) / 100;
+    if (key === 'ry') c.ry = Number(input.value) / 100;
+    customTemplate.elements = circles;
+    refreshCustomTemplateOnCanvas();
   });
 
   el('slot-row').addEventListener('click', (ev) => {
@@ -1357,6 +2386,8 @@ function init() {
     if (step === 3 && pathEditMode) applyWidthToSelected(brushSize);
   });
 
+  setupBrushModal();
+
   el('btn-ref').addEventListener('click', () => {
     refVisible = !refVisible;
     el('ref-label').textContent = refVisible ? '开' : '关';
@@ -1386,7 +2417,7 @@ function init() {
     if (!pathEditMode) canvas.discardActiveObject();
     toast(
       pathEditMode
-        ? '笔画模式：点选笔画后用上方颜色 / 粗细 / 效果即时调整'
+        ? '编辑模式：点选笔画后用上方颜色 / 粗细 / 效果即时调整'
         : '已恢复自由写字'
     );
   });
@@ -1420,6 +2451,11 @@ function init() {
   el('btn-trace-big').addEventListener('click', () => {
     if (step !== 3) return;
     openTraceModal();
+  });
+
+  el('btn-preview-play').addEventListener('click', () => {
+    if (step !== 3) return;
+    void runPreview();
   });
 
   el('trace-close').addEventListener('click', () => {
@@ -1463,12 +2499,7 @@ function init() {
     } else toast('没有可撤回的笔迹');
   });
 
-  populateBrushScroll();
-  el('brush-scroll').addEventListener('click', (ev) => {
-    const b = (ev.target as HTMLElement).closest('.brush-pill') as HTMLButtonElement | null;
-    if (!b?.dataset.brush) return;
-    setBrushKind(b.dataset.brush as BrushId);
-  });
+  refreshBrushButton();
 
   syncSlotsForTemplateChange(true);
   renderTplList();
