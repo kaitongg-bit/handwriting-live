@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0f0f10" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="手写字活" />
+  <meta name="application-name" content="手写字活" />
+  <title>手写字活</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+  <link rel="preload" href="./fonts/寒蝉手拙体.ttf" as="font" type="font/ttf" crossorigin />
+  <script>
+    try {
+      if (localStorage.getItem('handwriting-live-welcome-v3')) {
+        document.documentElement.classList.add('splash-seen');
+      }
+    } catch (_) {}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Inter+Tight:wght@500;600;700&family=Noto+Serif+SC:wght@400;700;900&family=Noto+Sans+SC:wght@400;500;600;700;900&family=ZCOOL+XiaoWei&family=Long+Cang&family=Ma+Shan+Zheng&family=Zhi+Mang+Xing&family=Liu+Jian+Mao+Cao&display=swap"
+    rel="stylesheet"
+  />
+  <script type="module" crossorigin src="./assets/index-Kn9wpw1b.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-CAn-aAso.css">
+</head>
+<body>
+  <div id="splash" class="splash" role="dialog" aria-modal="true" aria-labelledby="splash-title" aria-hidden="false">
+    <div class="splash-bg" id="splash-bg" aria-hidden="true"></div>
+    <div class="splash-inner">
+      <div class="splash-brand">
+        <!-- 品牌符号：同一「字」叠多层，仅中间实层不透明，其余半透明、各态肥瘦 -->
+        <div class="splash-zi-stack" aria-hidden="true">
+          <span class="splash-zi splash-zi--ghost splash-zi--e4">字</span>
+          <span class="splash-zi splash-zi--ghost splash-zi--e3">字</span>
+          <span class="splash-zi splash-zi--ghost splash-zi--e2">字</span>
+          <span class="splash-zi splash-zi--ghost splash-zi--e1">字</span>
+          <span class="splash-zi splash-zi--core">字</span>
+        </div>
+        <span id="splash-title" class="visually-hidden">手写字活</span>
+      </div>
+      <p class="splash-tagline">照片打底 · 海报摆字 · 笔迹成活图 · 导出 Live Photo</p>
+      <button type="button" class="big-btn primary" id="splash-dismiss">开始创作</button>
+    </div>
+  </div>
+
+  <div id="app">
+    <header class="app-header">
+      <button type="button" class="app-logo-btn" id="btn-home-logo" title="欢迎页" aria-label="打开欢迎页">
+        <span class="hdr-zi-stack" aria-hidden="true">
+          <span class="hdr-zi hdr-zi--ghost hdr-zi--e4">字</span>
+          <span class="hdr-zi hdr-zi--ghost hdr-zi--e3">字</span>
+          <span class="hdr-zi hdr-zi--ghost hdr-zi--e2">字</span>
+          <span class="hdr-zi hdr-zi--ghost hdr-zi--e1">字</span>
+          <span class="hdr-zi hdr-zi--core">字</span>
+        </span>
+      </button>
+      <div class="app-header-center">
+        <p class="step-title" id="step-title">第 1 步 · 选照片</p>
+        <p class="step-hint" id="step-hint">用作成片最底层。可跳过，用纯色底。</p>
+      </div>
+      <div class="steps" id="step-dots" aria-label="进度">
+        <button type="button" class="dot active" data-step="0" aria-current="step">1</button>
+        <button type="button" class="dot" data-step="1">2</button>
+        <button type="button" class="dot" data-step="2">3</button>
+        <button type="button" class="dot" data-step="3">4</button>
+      </div>
+    </header>
+
+    <div id="stage-wrap">
+      <canvas id="main"></canvas>
+      <button type="button" class="canvas-reset hidden" id="btn-reset-view" title="复位视图（双指捏合 / 滚轮缩放）">复位</button>
+      <!-- 第 4 步：左上底色 / 参考 / 左侧撤回 -->
+      <div class="stage-floats hidden" id="stage-step4-floats" aria-hidden="true">
+        <div class="stage-corner-lt">
+          <label class="corner-fab corner-fab--palette" title="画布底色（导出同色）">
+            <input type="color" id="board-bg-color" class="corner-fab-input" value="#f4f1ea" />
+            <svg class="corner-fab-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <path d="M12 3c-4 4-7 7.5-7 11a5 5 0 0 0 10 0c0-2-1.5-4-3-6l-3 3-3-3c1.5 2 3 4 3 6a2 2 0 1 1-4 0" stroke-linecap="round" stroke-linejoin="round" />
+              <circle cx="6" cy="14" r="1.2" fill="currentColor" stroke="none" />
+            </svg>
+          </label>
+          <button type="button" class="corner-fab" id="btn-ref-float" aria-pressed="true" title="参考层（海报红框）">
+            <svg class="corner-fab-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <path d="M5 5h14v14H5z" stroke-linejoin="round" />
+              <path d="M9 9h6v6H9z" opacity="0.45" />
+            </svg>
+          </button>
+        </div>
+        <div class="undo-stack">
+          <button type="button" class="undo-fab" id="btn-undo" title="撤回上一笔" aria-label="撤回上一笔">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+              <path d="M9 14l-4-4 4-4M5 10h11a4 4 0 0 1 4 4v0" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="undo-fab delete-stroke-fab hidden"
+            id="btn-delete-stroke-fab"
+            title="删除选中笔画或素材"
+            aria-label="删除选中"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <!-- 第 4 步：右侧编辑 / 加图 / 描字（素材图层在选中图时的悬浮条内） -->
+      <aside class="stage-rail hidden" id="stage-rail" aria-label="画布右侧工具">
+        <div class="stage-rail-grp stage-rail-grp--tools">
+          <button type="button" class="rail-ico-btn" id="btn-path-edit" aria-pressed="false" aria-label="编辑：可选笔画与素材" title="编辑">
+            <svg class="rail-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+            </svg>
+          </button>
+          <label class="rail-ico-btn rail-ico-btn--file" title="添加图片" aria-label="添加图片">
+            <input type="file" accept="image/*" id="input-board-images" multiple hidden />
+            <svg class="rail-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <circle cx="8.5" cy="10" r="1.5" fill="currentColor" stroke="none" />
+              <path d="M3 17l5-5 4 4 3-3 6 4" />
+            </svg>
+          </label>
+          <button type="button" class="rail-ico-btn rail-ico-btn--trace" id="btn-trace-big" aria-label="大字描写" title="大字描写">
+            <span class="rail-trace-char">描</span>
+          </button>
+        </div>
+      </aside>
+      <!-- 编辑模式 · 选中笔画：效果（无删除，删除用左侧垃圾桶） -->
+      <div class="stroke-effect-float hidden" id="stroke-effect-float" aria-hidden="true">
+        <div class="stroke-effect-float-inner" role="toolbar" aria-label="选中笔画效果">
+          <button type="button" class="stroke-fx-pill effect-btn active" data-effect="none">普通</button>
+          <button type="button" class="stroke-fx-pill effect-btn" data-effect="neon">发光</button>
+          <button type="button" class="stroke-fx-pill effect-btn" data-effect="emboss">立体</button>
+          <button type="button" class="stroke-fx-pill effect-btn" data-effect="knockout">镂空</button>
+        </div>
+      </div>
+      <!-- 编辑模式 · 选中素材图：仅图层与裁剪（无笔迹效果、无删） -->
+      <div class="image-layer-float hidden" id="image-layer-float" aria-hidden="true">
+        <div class="image-layer-float-inner" role="toolbar" aria-label="素材图层">
+          <button type="button" class="image-layer-pill" id="btn-float-layer-up" title="上移一层">上移</button>
+          <button type="button" class="image-layer-pill" id="btn-float-layer-down" title="下移一层">下移</button>
+          <button type="button" class="image-layer-pill" id="btn-float-layer-top" title="置于笔画下最顶">置顶</button>
+          <button type="button" class="image-layer-pill" id="btn-float-layer-bottom" title="贴近海报最底">置底</button>
+          <button type="button" class="image-layer-pill image-layer-pill--accent" id="btn-float-image-crop" title="裁剪">
+            裁剪
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 第 1 步面板 -->
+    <div class="sheet" id="panel-0">
+      <label class="big-btn primary">
+        <input type="file" accept="image/*" id="input-photo" hidden />
+        从相册选照片
+      </label>
+      <button type="button" class="big-btn ghost" id="btn-skip-photo">跳过，用白底</button>
+    </div>
+
+    <!-- 第 2 步：Poster 模板 + 摆红框（模板在弹层中选，见 #tpl-picker-modal） -->
+    <div class="sheet sheet-tpl hidden" id="panel-1">
+      <div class="tpl-toolbar-wrap">
+        <div class="tpl-toolbar-row">
+          <div class="tpl-panel-compact">
+            <button
+              type="button"
+              class="tpl-picker-trigger"
+              id="btn-open-tpl-picker"
+              aria-haspopup="dialog"
+              aria-expanded="false"
+              aria-controls="tpl-picker-modal"
+            >
+              <span class="tpl-picker-label" id="tpl-picker-label">—</span>
+              <span class="tpl-picker-caret" aria-hidden="true">▾</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="custom-editor hidden" id="custom-editor">
+        <div class="custom-editor-layout">
+          <div class="custom-rail" role="toolbar" aria-label="自定义圆位">
+            <button type="button" class="custom-rail-btn" id="btn-custom-add" title="在红框内点击放置圆心">＋</button>
+          </div>
+          <div class="custom-main">
+            <p class="custom-auto-note">圈内数字按放置顺序自动为 1、2、3…</p>
+            <span class="custom-place-hint hidden" id="custom-place-hint">在红框内点击放置</span>
+            <div class="custom-chips" id="custom-slot-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 第 3 步：一字一格 + 田字格（参考字位置大小须在本步完成） -->
+    <div class="sheet sheet-step2 hidden" id="panel-2">
+      <div class="seg" role="tablist" aria-label="画布上怎么操作">
+        <button type="button" class="seg-btn active" id="btn-step2-poster" data-step2-mode="poster">
+          移动整张海报
+        </button>
+        <button type="button" class="seg-btn" id="btn-step2-slot" data-step2-mode="slot">调参考字</button>
+      </div>
+      <p class="caption" id="step2-coach"></p>
+      <div class="slot-row-wrap">
+        <button type="button" class="slot-arrow hidden" id="slot-page-prev" aria-label="上一组字">‹</button>
+        <div class="slot-row" id="slot-row"></div>
+        <button type="button" class="slot-arrow hidden" id="slot-page-next" aria-label="下一组字">›</button>
+      </div>
+      <p class="slot-hint-inline">点某一字打开田字格；弹窗内可改字、左右切换槽位。</p>
+    </div>
+
+    <!-- 第 4 步：写字 -->
+    <div class="sheet sheet-draw hidden" id="panel-3">
+      <div class="draw-row-brush">
+        <button type="button" class="pill-btn brush-current" id="btn-open-brush-modal" title="选择笔刷与参数">
+          <span class="brush-current-icon" id="brush-current-icon">✒</span>
+          <span class="brush-current-label" id="brush-current-label">顺滑</span>
+          <span class="brush-current-caret">▾</span>
+        </button>
+        <label class="ico-color" title="颜色">
+          <input type="color" id="brush-color" value="#1a1a1a" />
+        </label>
+        <input type="range" id="brush-size" class="size-slider" min="1" max="22" value="4" title="粗细" />
+      </div>
+      <div class="draw-row-pack draw-row-pack--four" id="draw-row-pack">
+        <label class="draw-pack-cell" title="导出回放顺序">
+          <span class="draw-pack-cell-lab">回放</span>
+          <select id="replay-mode" class="draw-pack-select" aria-label="导出回放顺序">
+            <option value="stroke">按笔画</option>
+            <option value="char">按字（槽位）</option>
+            <option value="char-sync">按字（全体同步）</option>
+            <option value="silent">不写直出（按字蹦出）</option>
+            <option value="silent-sync">不写直出（全体压扁弹入）</option>
+          </select>
+        </label>
+        <label class="draw-pack-cell" title="出场动画风格">
+          <span class="draw-pack-cell-lab">动画</span>
+          <select id="replay-fx" class="draw-pack-select" aria-label="出场动画">
+            <option value="dash">描线</option>
+            <option value="drop">掉落</option>
+            <option value="shake">抖动</option>
+            <option value="squash">压扁弹入</option>
+            <option value="erase">擦入</option>
+          </select>
+        </label>
+        <label class="draw-pack-cell" title="成片总时长（1～10 秒）">
+          <span class="draw-pack-cell-lab">时长</span>
+          <select id="live-duration" class="draw-pack-select" aria-label="成片总时长">
+            <option value="1000">1s</option>
+            <option value="2000">2s</option>
+            <option value="3000" selected>3s</option>
+            <option value="4000">4s</option>
+            <option value="5000">5s</option>
+            <option value="6000">6s</option>
+            <option value="7000">7s</option>
+            <option value="8000">8s</option>
+            <option value="9000">9s</option>
+            <option value="10000">10s</option>
+          </select>
+        </label>
+        <div class="draw-pack-cell" title="按当前设置预览，不导出">
+          <span class="draw-pack-cell-lab">预览</span>
+          <button type="button" class="draw-pack-btn draw-pack-btn--primary" id="btn-preview-play">预览</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 大字逐字描写（与主画布同坐标系，便于合并） -->
+    <div id="trace-modal" class="modal modal-trace hidden" aria-hidden="true">
+      <div class="trace-inner">
+        <div class="trace-head">
+          <span id="trace-title">大字描写</span>
+          <button type="button" class="icon-btn" id="trace-close" aria-label="关闭">✕</button>
+        </div>
+        <p class="trace-sub" id="trace-sub">
+          淡印为第 3 步已摆好的参考字（若不满意请退回第 3 步用「调参考字」改）。写完后点「本字完成」。
+        </p>
+        <div class="trace-stage-wrap" id="trace-stage-wrap">
+          <canvas id="trace-canvas"></canvas>
+        </div>
+        <div class="trace-foot">
+          <button type="button" class="nav-btn" id="trace-prev">上一字</button>
+          <button type="button" class="nav-btn primary" id="trace-done-slot">本字完成</button>
+          <button type="button" class="nav-btn" id="trace-next">下一字</button>
+        </div>
+        <button type="button" class="big-btn ghost full" id="trace-exit-all">收工回主画布</button>
+      </div>
+    </div>
+
+    <!-- 底栏 -->
+    <footer class="bottom-bar">
+      <button type="button" class="nav-btn" id="btn-back">上一步</button>
+      <button type="button" class="nav-btn primary" id="btn-next">下一步</button>
+    </footer>
+
+    <div id="toast" class="toast" role="status"></div>
+  </div>
+
+  <!-- 田字格全屏 -->
+  <div id="warp-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-inner modal-inner--warp">
+      <div class="warp-modal-toolbar">
+        <button type="button" class="warp-slot-nav" id="warp-slot-prev" aria-label="上一字">‹</button>
+        <input
+          type="text"
+          class="warp-char-inline"
+          id="warp-char"
+          maxlength="1"
+          placeholder="字"
+          autocomplete="off"
+          inputmode="text"
+          aria-label="本字参考字形"
+        />
+        <span class="warp-slot-badge" id="warp-slot-badge">字1</span>
+        <button type="button" class="warp-slot-nav" id="warp-slot-next" aria-label="下一字">›</button>
+        <button type="button" class="icon-btn warp-close-btn" id="warp-close" aria-label="关闭">✕</button>
+      </div>
+      <label class="warp-font-row"
+        >字体
+        <select id="warp-font" class="modal-select">
+          <option value="'Noto Serif SC', 'Songti SC', 'STSong', serif">思源宋体</option>
+          <option value="'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif">思源黑体</option>
+          <option value="'ZCOOL XiaoWei', 'KaiTi', 'STKaiti', serif">站酷小薇（楷意）</option>
+          <option value="'Long Cang', cursive">仓耳龙藏（手写）</option>
+          <option value="'Ma Shan Zheng', 'KaiTi', serif">马善政楷书</option>
+          <option value="'Zhi Mang Xing', cursive">芝茫行（行书）</option>
+          <option value="'Liu Jian Mao Cao', cursive">刘健毛草（草书）</option>
+          <option value="'沐瑶随心手写体', cursive">沐瑶随心手写体（本地）</option>
+          <option value="'Chillzhuo', '寒蝉手拙体', cursive">寒蝉手拙体（本地）</option>
+          <option value="'PingFang SC', 'STHeiti', 'Microsoft YaHei', sans-serif">系统黑体</option>
+        </select>
+      </label>
+      <p class="warp-hintline">粉点拖外框 · 蓝线/蓝点拖田字比例；双击角或轴可复位。</p>
+      <div class="warp-stage" id="warp-stage" touch-action="none">
+        <canvas id="warp-out" width="512" height="512" aria-label="字形预览"></canvas>
+        <svg id="warp-overlay" class="warp-overlay" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+          <polygon class="warp-frame-line" id="warp-frame-poly" points="0,0 1000,0 1000,1000 0,1000" />
+          <line class="warp-axis-hitarea" id="warp-axis-v-hit" x1="500" y1="0" x2="500" y2="1000" />
+          <line class="warp-axis-hitarea" id="warp-axis-h-hit" x1="0" y1="500" x2="1000" y2="500" />
+          <line class="warp-axis-line" id="warp-axis-v" x1="500" y1="0" x2="500" y2="1000" />
+          <line class="warp-axis-line" id="warp-axis-h" x1="0" y1="500" x2="1000" y2="500" />
+          <circle class="warp-axis-handle" id="warp-axis-vx-handle" r="7" cx="500" cy="500" />
+          <circle class="warp-axis-handle" id="warp-axis-hy-handle" r="7" cx="500" cy="500" />
+          <circle class="warp-corner-handle" id="warp-corner-tl" r="10" cx="20" cy="20" data-corner="tl" />
+          <circle class="warp-corner-handle" id="warp-corner-tr" r="10" cx="980" cy="20" data-corner="tr" />
+          <circle class="warp-corner-handle" id="warp-corner-bl" r="10" cx="20" cy="980" data-corner="bl" />
+          <circle class="warp-corner-handle" id="warp-corner-br" r="10" cx="980" cy="980" data-corner="br" />
+        </svg>
+      </div>
+      <div class="warp-sliders">
+        <label>竖轴（左右挤，可与蓝线同调）<input type="range" id="warp-vx" min="8" max="92" value="50" /></label>
+        <label>横轴（上下挤，可与蓝线同调）<input type="range" id="warp-hy" min="8" max="92" value="50" /></label>
+      </div>
+      <div class="warp-presets">
+        <button type="button" data-p="rf">右肥</button>
+        <button type="button" data-p="us">上挤</button>
+        <button type="button" data-p="trap">倒梯形</button>
+        <button type="button" data-p="reset">重置</button>
+      </div>
+      <button type="button" class="big-btn primary full" id="warp-ok">用到红圈</button>
+    </div>
+  </div>
+
+  <!-- 海报模板（与笔刷同款底部弹层：左分类 · 右列表，无横向矮滚动条） -->
+  <div id="tpl-picker-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="tpl-picker-modal-title">
+    <div class="modal-inner tpl-picker-modal-inner">
+      <div class="modal-head">
+        <span id="tpl-picker-modal-title">海报模板</span>
+        <button type="button" class="icon-btn" id="tpl-picker-close" aria-label="关闭">✕</button>
+      </div>
+      <div class="tpl-picker-body">
+        <div class="tpl-picker-rail" role="tablist" aria-label="模板分类">
+          <button type="button" class="tpl-cat-btn tpl-picker-cat active" data-cat="all">全部</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="square">方形</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="vertical">竖排</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="horizontal">横排</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="custom">自定义</button>
+        </div>
+        <div class="tpl-picker-list" id="tpl-picker-list" role="listbox" aria-label="模板列表"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 笔刷选择 + 参数抽屉 -->
+  <div id="brush-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-inner brush-modal-inner">
+      <div class="modal-head">
+        <span>笔刷</span>
+        <button type="button" class="icon-btn" id="brush-modal-close" aria-label="关闭">✕</button>
+      </div>
+      <div class="brush-grid" id="brush-grid" role="listbox" aria-label="选择笔刷"></div>
+      <div class="brush-params" id="brush-params" aria-label="笔刷参数"></div>
+      <button type="button" class="big-btn primary full" id="brush-modal-ok">用这个笔刷</button>
+    </div>
+  </div>
+
+  <!-- 导出中 -->
+  <div id="export-mask" class="mask hidden">
+    <div class="spinner"></div>
+    <p>正在合成视频…</p>
+  </div>
+
+  <!-- 裁剪素材（仅编辑模式下选中画布素材图） -->
+  <div id="image-crop-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="image-crop-title">
+    <div class="modal-inner modal-inner--crop">
+      <div class="modal-head">
+        <span id="image-crop-title">裁剪素材</span>
+        <button type="button" class="icon-btn" id="image-crop-close" aria-label="关闭">✕</button>
+      </div>
+      <p class="crop-modal-hint">在图上拖拽框选要保留的区域</p>
+      <div class="crop-canvas-wrap">
+        <canvas id="image-crop-canvas" width="360" height="280"></canvas>
+      </div>
+      <div class="crop-modal-actions">
+        <button type="button" class="big-btn ghost full" id="image-crop-cancel">取消</button>
+        <button type="button" class="big-btn primary full" id="image-crop-apply">应用裁剪</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导出类型选择 -->
+  <div id="export-choice-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="export-choice-title">
+    <div class="modal-inner modal-inner--stack">
+      <div class="modal-head">
+        <span id="export-choice-title">导出</span>
+        <button type="button" class="icon-btn" id="export-choice-close" aria-label="关闭">✕</button>
+      </div>
+      <button type="button" class="big-btn primary full" id="export-opt-video">导出视频（Live）</button>
+      <button type="button" class="big-btn ghost full" id="export-opt-png">导出 PNG 图片</button>
+    </div>
+  </div>
+
+</body>
+</html>
