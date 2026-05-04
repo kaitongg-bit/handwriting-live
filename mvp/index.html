@@ -5,7 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
   <meta name="theme-color" content="#0f0f10" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <title>手写 Live · MVP</title>
+  <meta name="apple-mobile-web-app-title" content="手写字活" />
+  <meta name="application-name" content="手写字活" />
+  <title>手写字活</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="preload" href="/fonts/寒蝉手拙体.ttf" as="font" type="font/ttf" crossorigin />
+  <script>
+    try {
+      if (localStorage.getItem('handwriting-live-welcome-v3')) {
+        document.documentElement.classList.add('splash-seen');
+      }
+    } catch (_) {}
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
@@ -15,9 +26,31 @@
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
+  <div id="splash" class="splash" role="dialog" aria-modal="true" aria-labelledby="splash-title" aria-hidden="false">
+    <div class="splash-bg" id="splash-bg" aria-hidden="true"></div>
+    <div class="splash-inner">
+      <div class="splash-brand">
+        <!-- 品牌符号：同一「字」叠多层，仅中间实层不透明，其余半透明、各态肥瘦 -->
+        <div class="splash-zi-stack" aria-hidden="true">
+          <span class="splash-zi splash-zi--ghost splash-zi--e4">字</span>
+          <span class="splash-zi splash-zi--ghost splash-zi--e3">字</span>
+          <span class="splash-zi splash-zi--ghost splash-zi--e2">字</span>
+          <span class="splash-zi splash-zi--ghost splash-zi--e1">字</span>
+          <span class="splash-zi splash-zi--core">字</span>
+        </div>
+        <h1 class="splash-name-line" id="splash-title">手写字活</h1>
+      </div>
+      <p class="splash-tagline">照片打底 · 海报摆字 · 笔迹成活图 · 导出 Live Photo</p>
+      <button type="button" class="big-btn primary" id="splash-dismiss">开始创作</button>
+    </div>
+  </div>
+
   <div id="app">
     <header class="top-bar">
-      <div class="brand">手写 Live</div>
+      <div class="brand-lockup">
+        <div class="brand">手写字活</div>
+        <div class="brand-tagline">手写成片，字要活过来</div>
+      </div>
       <div class="steps" id="step-dots" aria-label="进度">
         <span class="dot active" data-step="0">1</span>
         <span class="dot" data-step="1">2</span>
@@ -45,38 +78,33 @@
       <button type="button" class="big-btn ghost" id="btn-skip-photo">跳过，用白底</button>
     </div>
 
-    <!-- 第 2 步：Poster 模板 + 摆红框 -->
+    <!-- 第 2 步：Poster 模板 + 摆红框（模板在弹层中选，见 #tpl-picker-modal） -->
     <div class="sheet sheet-tpl hidden" id="panel-1">
-      <div class="tpl-panel-top">
-        <div class="tpl-cat-row" role="tablist" aria-label="模板分类">
-          <button type="button" class="tpl-cat-btn active" data-cat="all">全部</button>
-          <button type="button" class="tpl-cat-btn" data-cat="square">方形</button>
-          <button type="button" class="tpl-cat-btn" data-cat="vertical">竖排</button>
-          <button type="button" class="tpl-cat-btn" data-cat="horizontal">横排</button>
-          <button type="button" class="tpl-cat-btn" data-cat="custom">自定义</button>
-        </div>
-        <div class="tpl-list-wrap">
-          <div class="tpl-list" id="tpl-list" role="listbox" aria-label="海报模板"></div>
-        </div>
+      <div class="tpl-panel-compact">
+        <button
+          type="button"
+          class="tpl-picker-trigger"
+          id="btn-open-tpl-picker"
+          aria-haspopup="dialog"
+          aria-expanded="false"
+          aria-controls="tpl-picker-modal"
+        >
+          <span class="tpl-picker-label" id="tpl-picker-label">—</span>
+          <span class="tpl-picker-caret" aria-hidden="true">▾</span>
+        </button>
       </div>
-      <p class="inline-tip" id="panel-1-tip">左右滑动选模板 · 拖红框移动 · 双指缩放</p>
+      <p class="inline-tip" id="panel-1-tip">点选模板 · 拖红框移动 · 双指缩放</p>
       <div class="custom-editor hidden" id="custom-editor">
-        <div class="custom-row-1">
-          <button type="button" class="pill-btn small" id="btn-custom-add" title="点选后，在红框内轻点落点">＋圆位</button>
-          <span class="custom-place-hint hidden" id="custom-place-hint">在红框内点击放置</span>
+        <div class="custom-editor-layout">
+          <div class="custom-rail" role="toolbar" aria-label="自定义圆位">
+            <button type="button" class="custom-rail-btn" id="btn-custom-add" title="在红框内点击放置圆心">＋</button>
+          </div>
+          <div class="custom-main">
+            <p class="custom-auto-note">圈内数字按放置顺序自动为 1、2、3…</p>
+            <span class="custom-place-hint hidden" id="custom-place-hint">在红框内点击放置</span>
+            <div class="custom-chips" id="custom-slot-list"></div>
+          </div>
         </div>
-        <label class="custom-labels-wrap"
-          >槽位数字（圈内显示）
-          <input
-            type="text"
-            class="custom-labels-in"
-            id="custom-labels"
-            inputmode="numeric"
-            autocomplete="off"
-            placeholder="连写如 1234，按圆顺序"
-          />
-        </label>
-        <div class="custom-chips" id="custom-slot-list"></div>
       </div>
     </div>
 
@@ -127,6 +155,15 @@
             <option value="squash">压扁弹入</option>
             <option value="erase">擦入</option>
           </select>
+        </label>
+        <label
+          class="replay-label replay-live-dur"
+          title="导出/预览时整段出场动画的目标总时长。苹果 Live Photo 常见约 3 秒；可调约 1.5～8 秒。"
+        >成片时长
+          <span class="live-dur-row">
+            <input type="range" id="live-duration" min="1500" max="8000" step="100" value="3200" />
+            <span id="live-duration-label" class="live-dur-val">3.2s</span>
+          </span>
         </label>
       </div>
       <div class="draw-actions">
@@ -229,6 +266,26 @@
         <button type="button" data-p="reset">重置</button>
       </div>
       <button type="button" class="big-btn primary full" id="warp-ok">用到红圈</button>
+    </div>
+  </div>
+
+  <!-- 海报模板（与笔刷同款底部弹层：左分类 · 右列表，无横向矮滚动条） -->
+  <div id="tpl-picker-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="tpl-picker-modal-title">
+    <div class="modal-inner tpl-picker-modal-inner">
+      <div class="modal-head">
+        <span id="tpl-picker-modal-title">海报模板</span>
+        <button type="button" class="icon-btn" id="tpl-picker-close" aria-label="关闭">✕</button>
+      </div>
+      <div class="tpl-picker-body">
+        <div class="tpl-picker-rail" role="tablist" aria-label="模板分类">
+          <button type="button" class="tpl-cat-btn tpl-picker-cat active" data-cat="all">全部</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="square">方形</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="vertical">竖排</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="horizontal">横排</button>
+          <button type="button" class="tpl-cat-btn tpl-picker-cat" data-cat="custom">自定义</button>
+        </div>
+        <div class="tpl-picker-list" id="tpl-picker-list" role="listbox" aria-label="模板列表"></div>
+      </div>
     </div>
   </div>
 

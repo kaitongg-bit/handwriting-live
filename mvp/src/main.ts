@@ -106,6 +106,15 @@ function getTplCategory(): string {
   return a?.dataset.cat || 'all';
 }
 
+/** 自定义：圆内数字仅表示顺序，按当前圆在列表中的位置 1…n 自动同步 */
+function renumberCustomCirclesInOrder() {
+  if (selectedPosterTemplate.id !== 'custom') return;
+  const circles = getCircleElements(customTemplate);
+  circles.forEach((c, i) => {
+    c.n = String(i + 1);
+  });
+}
+
 function syncTplCatButtons(cat: string) {
   document.querySelectorAll('.tpl-cat-btn').forEach((b) => {
     b.classList.toggle('active', (b as HTMLElement).dataset.cat === cat);
@@ -117,8 +126,8 @@ function updatePanel1Tip() {
   if (!tip || step !== 1) return;
   tip.textContent =
     selectedPosterTemplate.id === 'custom'
-      ? '＋圆位后点红框落圆；拖橙框移圆，拖四角等比缩放，拖四边中点单独改宽窄/高低。数字连写如 12345。拖虚线框移整张 · 双指缩放'
-      : '左右滑动选模板 · 拖红框移动 · 双指缩放';
+      ? '点侧栏＋后在红框内落圆，圈内自动编号。拖橙框移圆，拖四角缩放，拖四边改扁圆。拖虚线框移整张 · 双指缩放'
+      : '点上方选模板 · 拖红框移动 · 双指缩放';
 }
 
 function getSelectedWarpFont() {
@@ -748,17 +757,55 @@ function filteredTemplates() {
   return POSTER_TEMPLATES.filter((t) => cat === 'all' || t.category === cat);
 }
 
-function renderTplList() {
-  const list = el('tpl-list');
+function updateTplPickerLabel() {
+  const lab = document.getElementById('tpl-picker-label');
+  if (!lab) return;
+  const t = selectedPosterTemplate;
+  lab.textContent = t.id === 'custom' ? '自定义 · 圆位布局' : t.name;
+}
+
+function renderTplPickerList() {
+  const list = document.getElementById('tpl-picker-list');
+  if (!list) return;
   list.innerHTML = '';
   filteredTemplates().forEach((t) => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'tpl-btn' + (t.id === selectedPosterTemplate.id ? ' active' : '');
-    btn.textContent = t.id === 'custom' ? '圆位布局' : t.name;
+    btn.className = 'tpl-picker-item' + (t.id === selectedPosterTemplate.id ? ' active' : '');
+    btn.textContent = t.id === 'custom' ? '圆位布局（自定义）' : t.name;
     btn.dataset.tid = t.id;
     list.appendChild(btn);
   });
+}
+
+function openTplPicker() {
+  const m = document.getElementById('tpl-picker-modal');
+  if (!m) return;
+  m.classList.remove('hidden');
+  m.setAttribute('aria-hidden', 'false');
+  syncTplCatButtons(getTplCategory());
+  renderTplPickerList();
+  const tr = document.getElementById('btn-open-tpl-picker');
+  if (tr) tr.setAttribute('aria-expanded', 'true');
+}
+
+function closeTplPicker() {
+  const m = document.getElementById('tpl-picker-modal');
+  if (!m) return;
+  m.classList.add('hidden');
+  m.setAttribute('aria-hidden', 'true');
+  const tr = document.getElementById('btn-open-tpl-picker');
+  if (tr) tr.setAttribute('aria-expanded', 'false');
+}
+
+function syncTplPickerUI() {
+  updateTplPickerLabel();
+  const modal = document.getElementById('tpl-picker-modal');
+  if (modal && !modal.classList.contains('hidden')) renderTplPickerList();
+}
+
+function renderTplList() {
+  syncTplPickerUI();
 }
 
 function renderCustomEditor() {
@@ -769,30 +816,23 @@ function renderCustomEditor() {
   host.classList.toggle('hidden', !visible);
   if (!visible) return;
   normalizeCustomTemplate();
+  renumberCustomCirclesInOrder();
   const circles = getCircleElements(customTemplate);
-  const labelsIn = el('custom-labels') as HTMLInputElement;
-  const typing = document.activeElement === labelsIn;
-  const selA = labelsIn.selectionStart;
-  const selB = labelsIn.selectionEnd;
-  if (!typing) labelsIn.value = circles.map((c) => String(c.n ?? '')).join('');
   list.innerHTML = circles
     .map(
       (c, i) => `
       <div class="custom-chip" data-idx="${i}">
-        <span class="custom-chip-lab">${plainSlotLabel(c.n, i)}</span>
+        <span class="custom-chip-lab">圆 ${plainSlotLabel(c.n, i)}</span>
         <button type="button" class="custom-chip-del" data-idx="${i}" aria-label="删除">×</button>
       </div>`
     )
     .join('');
-  if (typing && typeof selA === 'number' && typeof selB === 'number') {
-    labelsIn.focus();
-    labelsIn.setSelectionRange(selA, selB);
-  }
 }
 
 function refreshCustomTemplateOnCanvas(preserveTransform = false) {
   normalizeCustomTemplate();
   if (selectedPosterTemplate.id !== 'custom') return;
+  renumberCustomCirclesInOrder();
   selectedPosterTemplate = customTemplate;
   syncSlotsForTemplateChange(false);
   if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(preserveTransform);
@@ -2022,8 +2062,36 @@ function animateObjectByFx(obj: fabric.Object, dur: number, fx: ReplayFx): Promi
   return dashAnimateObject(obj, dur);
 }
 
-/** Live Photo 风格：整段约 3 秒；按笔画/按字均分。stroke/char 模式下用 dash 动画。 */
-const LIVE_TARGET_MS = 3200;
+/** Live Photo 风格目标总时长（ms）；默认约 3.2s，见 #live-duration */
+const LIVE_DURATION_STORAGE_KEY = 'handwriting-live-live-ms';
+const LIVE_DURATION_DEFAULT_MS = 3200;
+
+function getLiveTargetMs(): number {
+  const input = document.getElementById('live-duration') as HTMLInputElement | null;
+  if (input?.value != null && input.value !== '') {
+    const v = Number(input.value);
+    if (Number.isFinite(v)) return Math.min(8000, Math.max(1500, v));
+  }
+  try {
+    const s = localStorage.getItem(LIVE_DURATION_STORAGE_KEY);
+    if (s != null) {
+      const v = Number(s);
+      if (Number.isFinite(v)) return Math.min(8000, Math.max(1500, v));
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return LIVE_DURATION_DEFAULT_MS;
+}
+
+function syncLiveDurationLabel() {
+  const input = document.getElementById('live-duration') as HTMLInputElement | null;
+  const label = document.getElementById('live-duration-label');
+  if (!input || !label) return;
+  const ms = Number(input.value);
+  const sec = Number.isFinite(ms) ? ms / 1000 : LIVE_DURATION_DEFAULT_MS / 1000;
+  label.textContent = `${sec.toFixed(1)}s`;
+}
 
 function playbackModeFromReplay(replay: string): 'stroke' | 'char' | 'char-sync' {
   if (replay === 'char-sync') return 'char-sync';
@@ -2047,7 +2115,8 @@ async function runExportPlayback(
     const keys = [...bucket.keys()].sort((a, b) => a - b);
     const all = keys.flatMap((k) => bucket.get(k)!);
     if (!all.length) return;
-    const dur = Math.max(360, Math.min(2800, LIVE_TARGET_MS - 160));
+    /** 全体同步一波：时长贴近滑杆（略留边以免边界帧截断） */
+    const dur = Math.max(360, Math.min(7800, getLiveTargetMs() - 80));
     await Promise.all(all.map((o) => animateObjectByFx(o, dur, fx)));
     return;
   }
@@ -2061,22 +2130,36 @@ async function runExportPlayback(
     }
     const keys = [...bucket.keys()].sort((a, b) => a - b);
     const n = Math.max(1, keys.length);
-    const dur = Math.max(220, Math.min(800, Math.floor(LIVE_TARGET_MS / n) - 60));
-    const pause = Math.max(40, Math.floor((LIVE_TARGET_MS - dur * n) / Math.max(1, n - 1)));
-    for (const k of keys) {
-      const grp = bucket.get(k)!;
+    const liveMs = getLiveTargetMs();
+    const dur = Math.max(220, Math.min(800, Math.floor(liveMs / n) - 60));
+    /** n 段动画 + (n-1) 个间隔 = liveMs；间隔只在「段与段之间」，不在最后一段后再停一次 */
+    const gap =
+      n <= 1 ? 0 : Math.max(40, Math.floor((liveMs - dur * n) / (n - 1)));
+    for (let i = 0; i < keys.length; i++) {
+      const grp = bucket.get(keys[i])!;
       await Promise.all(grp.map((o) => animateObjectByFx(o, dur, fx)));
-      await new Promise((r) => setTimeout(r, pause));
+      if (i < keys.length - 1) await new Promise((r) => setTimeout(r, gap));
+      else if (n === 1)
+        await new Promise((r) =>
+          setTimeout(r, Math.max(0, Math.floor(liveMs - dur))),
+        );
     }
     return;
   }
-  const n = Math.max(1, paths.length);
-  const dur = Math.max(80, Math.min(600, Math.floor(LIVE_TARGET_MS / n) - 20));
-  const pause = Math.max(8, Math.floor((LIVE_TARGET_MS - dur * n) / Math.max(1, n - 1)));
-  for (const p of paths) {
-    if (!canvas.getObjects().includes(p)) continue;
+  const valid = paths.filter((p) => canvas.getObjects().includes(p));
+  const n = Math.max(1, valid.length);
+  const liveMs = getLiveTargetMs();
+  const dur = Math.max(80, Math.min(600, Math.floor(liveMs / n) - 20));
+  const gap =
+    n <= 1 ? 0 : Math.max(8, Math.floor((liveMs - dur * n) / (n - 1)));
+  for (let i = 0; i < valid.length; i++) {
+    const p = valid[i];
     await animateObjectByFx(p, dur, fx);
-    await new Promise((r) => setTimeout(r, pause));
+    if (i < valid.length - 1) await new Promise((r) => setTimeout(r, gap));
+    else if (n === 1)
+      await new Promise((r) =>
+        setTimeout(r, Math.max(0, Math.floor(liveMs - dur))),
+      );
   }
 }
 
@@ -2087,9 +2170,14 @@ async function runSilentPopIn() {
     .filter((x) => !!x.im && !!slotUrls[x.i]) as { im: fabric.Image; i: number }[];
   if (!ordered.length) return;
   const n = ordered.length;
-  const dur = Math.max(280, Math.min(900, Math.floor(LIVE_TARGET_MS / n) - 80));
-  const pause = Math.max(60, Math.floor((LIVE_TARGET_MS - dur * n) / Math.max(1, n - 1)));
-  for (const { im } of ordered) {
+  const liveMs = getLiveTargetMs();
+  const dur = Math.max(280, Math.min(900, Math.floor(liveMs / n) - 80));
+  const gap =
+    n <= 1 ? 0 : Math.max(60, Math.floor((liveMs - dur * n) / (n - 1)));
+  for (let i = 0; i < ordered.length; i++) {
+    const { im } = ordered[i];
+    const tailMs =
+      i < ordered.length - 1 ? gap : n === 1 ? Math.max(0, Math.floor(liveMs - dur)) : 0;
     const sx = im.scaleX || 1;
     const sy = im.scaleY || 1;
     im.set({ scaleX: sx * 0.82, scaleY: sy * 0.82, opacity: 0 });
@@ -2107,7 +2195,7 @@ async function runSilentPopIn() {
         duration: dur,
         easing: fabric.util.ease.easeOutBack,
         onChange: () => canvas.renderAll(),
-        onComplete: () => setTimeout(resolve, pause),
+        onComplete: () => setTimeout(resolve, tailMs),
       });
     });
   }
@@ -2119,7 +2207,7 @@ async function runSilentSquashTogether() {
     .map((im, i) => ({ im, i }))
     .filter((x) => !!x.im && !!slotUrls[x.i]) as { im: fabric.Image; i: number }[];
   if (!ordered.length) return;
-  const dur = Math.max(420, Math.min(2600, LIVE_TARGET_MS - 180));
+  const dur = Math.max(420, Math.min(2600, getLiveTargetMs() - 180));
   await Promise.all(
     ordered.map(
       ({ im }) =>
@@ -2185,16 +2273,47 @@ function downloadBlob(blob: Blob, filename: string) {
   }, 800);
 }
 
+/** 小屏主画布物理像素往往不足 1080p，导出时适度放大，便于相册/大屏更清晰（上限防内存爆） */
+function computeExportVideoDimensions(sw: number, sh: number) {
+  if (sw < 2 || sh < 2) return { w: sw, h: sh, scale: 1 };
+  const longEdge = Math.max(sw, sh);
+  const MIN_LONG = 1080;
+  const MAX_LONG = 2560;
+  const MAX_SCALE = 2.5;
+  let scale = 1;
+  if (longEdge < MIN_LONG) {
+    scale = Math.min(MAX_SCALE, MIN_LONG / longEdge);
+  }
+  if (longEdge * scale > MAX_LONG) {
+    scale = MAX_LONG / longEdge;
+  }
+  scale = Math.min(scale, MAX_SCALE);
+  let w = Math.round(sw * scale);
+  let h = Math.round(sh * scale);
+  w = Math.max(2, w - (w % 2));
+  h = Math.max(2, h - (h % 2));
+  return { w, h, scale: w / sw };
+}
+
+/** H.264 码率随分辨率略涨；原 4.5Mbps 对略大图偏糊 */
+function computeH264Bitrate(w: number, h: number, fps: number) {
+  const pixels = w * h;
+  const raw = Math.round(pixels * fps * 0.12);
+  return Math.min(28_000_000, Math.max(6_500_000, raw));
+}
+
 /** 用 WebCodecs 把 srcCanvas 在 runAnim 跑动期间逐帧编码成 H.264，
  *  再用 mp4-muxer 合到非 fragmented MP4（moov 在头部）。
  *  iOS 相册 / QuickTime / 微信全部直接识别。 */
 async function encodeWithWebCodecs(
   srcCanvas: HTMLCanvasElement,
   runAnim: () => Promise<void>,
+  bitrateOverride?: number,
 ): Promise<Blob> {
   const fps = 30;
   const w = srcCanvas.width;
   const h = srcCanvas.height;
+  const bitrate = bitrateOverride ?? computeH264Bitrate(w, h, fps);
 
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -2218,7 +2337,7 @@ async function encodeWithWebCodecs(
         width: w,
         height: h,
         framerate: fps,
-        bitrate: 4_500_000,
+        bitrate,
         bitrateMode: 'variable',
       };
       if (avcFmt) cfg.avc = { format: avcFmt };
@@ -2240,9 +2359,19 @@ async function encodeWithWebCodecs(
 
   let frameIdx = 0;
   let stopped = false;
+  /** 与 setInterval 对齐：用墙钟做 VideoFrame timestamp，避免帧丢失或全体同步高负载时「固定 fps 序号」与真实时长脱节 */
+  const wall0 = performance.now();
+  let lastTsUs = -1;
+  const nextMonotonicTs = () => {
+    let t = Math.round((performance.now() - wall0) * 1000);
+    if (t <= lastTsUs) t = lastTsUs + 1;
+    lastTsUs = t;
+    return t;
+  };
+
   const grabFrame = () => {
     if (stopped) return;
-    const ts = Math.round((frameIdx * 1_000_000) / fps);
+    const ts = nextMonotonicTs();
     try {
       const vf = new VideoFrame(srcCanvas, { timestamp: ts });
       const isKey = frameIdx % fps === 0;
@@ -2257,13 +2386,26 @@ async function encodeWithWebCodecs(
 
   try {
     await runAnim();
+    /** 与「成片时长」滑杆对齐：补足墙钟时间，避免分段计时误差或 Fabric 提前回调导致 MP4 只有 ~1s */
+    const pad = Math.max(0, getLiveTargetMs() - (performance.now() - wall0));
+    if (pad > 0) await new Promise((r) => setTimeout(r, pad));
   } finally {
     stopped = true;
     clearInterval(interval);
   }
 
-  /** 多吸两帧让最后一画的尾巴稳定 */
-  for (let i = 0; i < 6; i++) grabFrame();
+  /** 收尾帧（stopped 后原 grabFrame 会直接 return，须单独编码） */
+  for (let i = 0; i < 6; i++) {
+    const ts = nextMonotonicTs();
+    try {
+      const vf = new VideoFrame(srcCanvas, { timestamp: ts });
+      encoder.encode(vf, { keyFrame: false });
+      vf.close();
+      frameIdx++;
+    } catch (e) {
+      console.warn('[VideoFrame] tail encode failed', e);
+    }
+  }
 
   await encoder.flush();
   encoder.close();
@@ -2324,21 +2466,36 @@ async function exportVideo() {
 
   const sourceCanvas = canvas.lowerCanvasEl;
   const streamCanvas = document.createElement('canvas');
-  /** H.264 要求偶数尺寸 */
-  streamCanvas.width = sourceCanvas.width - (sourceCanvas.width % 2);
-  streamCanvas.height = sourceCanvas.height - (sourceCanvas.height % 2);
+  const { w: exportW, h: exportH } = computeExportVideoDimensions(
+    sourceCanvas.width,
+    sourceCanvas.height,
+  );
+  streamCanvas.width = exportW;
+  streamCanvas.height = exportH;
   const sctx = streamCanvas.getContext('2d')!;
-  const dpr = window.devicePixelRatio || 1;
+  const exportBitrate = computeH264Bitrate(exportW, exportH, 30);
 
   let anim = true;
   const tickStream = () => {
     if (!anim) return;
-    sctx.save();
-    sctx.scale(dpr, dpr);
+    /** 先强制合成再拷贝：全体同步等多路并行动画时，避免 rAF 早于 Fabric 落笔画到 lowerCanvas，导出比预览少帧/不对齐 */
+    canvas.renderAll();
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.imageSmoothingEnabled = true;
+    sctx.imageSmoothingQuality = 'high';
     sctx.fillStyle = '#f4f1ea';
-    sctx.fillRect(0, 0, streamCanvas.width / dpr, streamCanvas.height / dpr);
-    sctx.restore();
-    sctx.drawImage(sourceCanvas, 0, 0);
+    sctx.fillRect(0, 0, streamCanvas.width, streamCanvas.height);
+    sctx.drawImage(
+      sourceCanvas,
+      0,
+      0,
+      sourceCanvas.width,
+      sourceCanvas.height,
+      0,
+      0,
+      streamCanvas.width,
+      streamCanvas.height,
+    );
     requestAnimationFrame(tickStream);
   };
   tickStream();
@@ -2354,9 +2511,9 @@ async function exportVideo() {
           if (replay === 'silent-sync') await runSilentSquashTogether();
           else await runSilentPopIn();
         } else await runExportPlayback(paths, playbackModeFromReplay(replay), fx);
-      });
+      }, exportBitrate);
       anim = false;
-      downloadBlob(blob, `手写Live_${Date.now()}.mp4`);
+      downloadBlob(blob, `手写字活_${Date.now()}.mp4`);
       toast('已保存到下载（苹果相册可直接存）');
       exported = true;
     } catch (e) {
@@ -2374,7 +2531,18 @@ async function exportVideo() {
     const chunks: Blob[] = [];
     if (mime) {
       const stream = streamCanvas.captureStream(30);
-      recorder = new MediaRecorder(stream, { mimeType: mime });
+      try {
+        recorder = new MediaRecorder(stream, {
+          mimeType: mime,
+          videoBitsPerSecond: exportBitrate,
+        });
+      } catch {
+        try {
+          recorder = new MediaRecorder(stream, { mimeType: mime });
+        } catch {
+          recorder = new MediaRecorder(stream);
+        }
+      }
       recorder.ondataavailable = (e) => {
         if (e.data.size) chunks.push(e.data);
       };
@@ -2395,7 +2563,7 @@ async function exportVideo() {
     if (mime && chunks.length) {
       const blob = new Blob(chunks, { type: mime });
       const ext = mime.includes('mp4') ? 'mp4' : 'webm';
-      downloadBlob(blob, `手写Live_${Date.now()}.${ext}`);
+      downloadBlob(blob, `手写字活_${Date.now()}.${ext}`);
       toast(
         ext === 'webm'
           ? '已保存为 WebM。苹果设备建议升级 Safari 17+ 后再导出 MP4'
@@ -2764,8 +2932,63 @@ function setupCanvasZoomPan() {
   });
 }
 
+const WELCOME_SPLASH_KEY = 'handwriting-live-welcome-v3';
+
+/** 开屏背景：大量随机位置/旋转/大小的字，寒蝉体 */
+function fillSplashBackgroundField(container: HTMLElement | null) {
+  if (!container) return;
+  const pool = ['字', '活', '手', '写', '墨', '笔', '纸', '砚'];
+  const frag = document.createDocumentFragment();
+  const n = 88;
+  for (let i = 0; i < n; i++) {
+    const el = document.createElement('span');
+    el.className = 'splash-bg-item';
+    el.textContent = pool[(Math.random() * pool.length) | 0];
+    el.style.left = `${Math.random() * 100}%`;
+    el.style.top = `${Math.random() * 100}%`;
+    el.style.fontSize = `${11 + Math.random() * 58}px`;
+    el.style.setProperty('--o', String(0.035 + Math.random() * 0.13));
+    el.style.setProperty('--pulse-dur', `${4 + Math.random() * 10}s`);
+    el.style.transform = `translate(-50%, -50%) rotate(${Math.random() * 360}deg) scale(${0.3 + Math.random() * 1.35})`;
+    frag.appendChild(el);
+  }
+  container.appendChild(frag);
+}
+
+/** 首访全屏欢迎：已定名产品、避免一进来像「裸工具页」 */
+function setupWelcomeSplash() {
+  const root = document.getElementById('splash');
+  if (!root) return;
+  if (document.documentElement.classList.contains('splash-seen')) {
+    root.remove();
+    return;
+  }
+  fillSplashBackgroundField(document.getElementById('splash-bg'));
+  const btn = document.getElementById('splash-dismiss');
+  if (!btn) return;
+  const close = () => {
+    try {
+      localStorage.setItem(WELCOME_SPLASH_KEY, '1');
+    } catch (_) {
+      /* ignore */
+    }
+    document.documentElement.classList.add('splash-seen');
+    root.setAttribute('aria-hidden', 'true');
+    root.classList.add('splash--out');
+    const done = () => {
+      root.remove();
+    };
+    root.addEventListener('transitionend', (e) => {
+      if (e.target === root) done();
+    });
+    window.setTimeout(done, 450);
+  };
+  btn.addEventListener('click', close);
+}
+
 /* ---------- 初始化 ---------- */
 function init() {
+  setupWelcomeSplash();
   normalizeCustomTemplate();
   canvas = new fabric.Canvas('main', {
     isDrawingMode: false,
@@ -2909,18 +3132,28 @@ function init() {
     });
   });
 
-  el('tpl-list').addEventListener('click', (ev) => {
-    const b = (ev.target as HTMLElement).closest('.tpl-btn') as HTMLButtonElement | null;
+  el('tpl-picker-list').addEventListener('click', (ev) => {
+    const b = (ev.target as HTMLElement).closest('.tpl-picker-item') as HTMLButtonElement | null;
     if (!b?.dataset.tid) return;
     const t = POSTER_TEMPLATES.find((x) => x.id === b.dataset.tid);
-    if (!t || t.id === selectedPosterTemplate.id) return;
+    if (!t || t.id === selectedPosterTemplate.id) {
+      closeTplPicker();
+      return;
+    }
     selectedPosterTemplate = t.id === 'custom' ? customTemplate : t;
     placement = defaultPlacementForTemplate(selectedPosterTemplate);
     syncSlotsForTemplateChange(true);
     if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
-    renderTplList();
+    syncTplPickerUI();
     renderCustomEditor();
     updatePanel1Tip();
+    closeTplPicker();
+  });
+
+  el('btn-open-tpl-picker').addEventListener('click', openTplPicker);
+  el('tpl-picker-close').addEventListener('click', closeTplPicker);
+  el('tpl-picker-modal').addEventListener('click', (e) => {
+    if (e.target === el('tpl-picker-modal')) closeTplPicker();
   });
 
   el('btn-custom-add').addEventListener('click', () => {
@@ -2932,20 +3165,6 @@ function init() {
     }
     setCustomPlaceNext(true);
     toast('请在红框内轻点，放置新圆心');
-  });
-
-  el('custom-labels')?.addEventListener('input', () => {
-    if (selectedPosterTemplate.id !== 'custom') return;
-    const raw = (el('custom-labels') as HTMLInputElement).value.replace(/\s/g, '');
-    const circles = getCircleElements(customTemplate) as PosterCircleEl[];
-    for (let i = 0; i < circles.length; i++) {
-      circles[i].n = raw[i] != null && raw[i] !== '' ? raw[i] : String(i + 1);
-    }
-    customTemplate.elements = circles;
-    selectedPosterTemplate = customTemplate;
-    renderCustomEditor();
-    syncCustomSlotLabelTexts();
-    if (step === 2) rebuildSlotButtons();
   });
 
   el('custom-slot-list').addEventListener('click', (ev) => {
@@ -3100,6 +3319,28 @@ function init() {
     if (step === 3 && pathEditMode) applyWidthToSelected(brushSize);
   });
 
+  const liveDurEl = document.getElementById('live-duration') as HTMLInputElement | null;
+  if (liveDurEl) {
+    try {
+      const savedMs = localStorage.getItem(LIVE_DURATION_STORAGE_KEY);
+      if (savedMs != null) {
+        const v = Number(savedMs);
+        if (Number.isFinite(v)) liveDurEl.value = String(Math.min(8000, Math.max(1500, v)));
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    syncLiveDurationLabel();
+    liveDurEl.addEventListener('input', () => {
+      syncLiveDurationLabel();
+      try {
+        localStorage.setItem(LIVE_DURATION_STORAGE_KEY, liveDurEl.value);
+      } catch (_) {
+        /* ignore */
+      }
+    });
+  }
+
   setupBrushModal();
 
   el('btn-ref').addEventListener('click', () => {
@@ -3223,7 +3464,7 @@ function init() {
 try {
   init();
 } catch (err) {
-  console.error('[手写Live] init', err);
+  console.error('[手写字活] init', err);
   el('step-hint').textContent =
     '初始化失败：' + (err instanceof Error ? err.message : String(err)) + '（请打开控制台查看）';
   el('step-hint').style.color = '#fca5a5';
