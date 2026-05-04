@@ -46,25 +46,37 @@
     </div>
 
     <!-- 第 2 步：Poster 模板 + 摆红框 -->
-    <div class="sheet hidden" id="panel-1">
-      <label class="tpl-field"
-        >分类
-        <select id="tpl-category" class="tpl-select">
-          <option value="all">全部</option>
-          <option value="square">方形</option>
-          <option value="vertical">竖排</option>
-          <option value="horizontal">横排</option>
-          <option value="custom">自定义</option>
-        </select>
-      </label>
-      <div class="tpl-list" id="tpl-list" role="listbox" aria-label="海报模板"></div>
-      <p class="inline-tip">选模板后单指拖动红框 · 双指缩放旋转</p>
-      <div class="custom-editor hidden" id="custom-editor">
-        <div class="custom-head">
-          <span>自定义圆位</span>
-          <button type="button" class="pill-btn small" id="btn-custom-add">+ 添加圆</button>
+    <div class="sheet sheet-tpl hidden" id="panel-1">
+      <div class="tpl-panel-top">
+        <div class="tpl-cat-row" role="tablist" aria-label="模板分类">
+          <button type="button" class="tpl-cat-btn active" data-cat="all">全部</button>
+          <button type="button" class="tpl-cat-btn" data-cat="square">方形</button>
+          <button type="button" class="tpl-cat-btn" data-cat="vertical">竖排</button>
+          <button type="button" class="tpl-cat-btn" data-cat="horizontal">横排</button>
+          <button type="button" class="tpl-cat-btn" data-cat="custom">自定义</button>
         </div>
-        <div class="custom-list" id="custom-slot-list"></div>
+        <div class="tpl-list-wrap">
+          <div class="tpl-list" id="tpl-list" role="listbox" aria-label="海报模板"></div>
+        </div>
+      </div>
+      <p class="inline-tip" id="panel-1-tip">左右滑动选模板 · 拖红框移动 · 双指缩放</p>
+      <div class="custom-editor hidden" id="custom-editor">
+        <div class="custom-row-1">
+          <button type="button" class="pill-btn small" id="btn-custom-add" title="点选后，在红框内轻点落点">＋圆位</button>
+          <span class="custom-place-hint hidden" id="custom-place-hint">在红框内点击放置</span>
+        </div>
+        <label class="custom-labels-wrap"
+          >槽位数字（圈内显示）
+          <input
+            type="text"
+            class="custom-labels-in"
+            id="custom-labels"
+            inputmode="numeric"
+            autocomplete="off"
+            placeholder="连写如 1234，按圆顺序"
+          />
+        </label>
+        <div class="custom-chips" id="custom-slot-list"></div>
       </div>
     </div>
 
@@ -102,7 +114,9 @@
           <select id="replay-mode" class="mini-select">
             <option value="stroke">按笔画</option>
             <option value="char">按字（槽位）</option>
+            <option value="char-sync">按字（全体同步）</option>
             <option value="silent">不写直出（按字蹦出）</option>
+            <option value="silent-sync">不写直出（全体压扁弹入）</option>
           </select>
         </label>
         <label class="replay-label" title="出场动画风格">动画
@@ -110,6 +124,7 @@
             <option value="dash">描线</option>
             <option value="drop">掉落</option>
             <option value="shake">抖动</option>
+            <option value="squash">压扁弹入</option>
             <option value="erase">擦入</option>
           </select>
         </label>

@@ -231,11 +231,11 @@ body {
 }
 
 .custom-editor {
-  margin-top: 6px;
+  margin-top: 4px;
   border: 1px solid var(--hairline);
   border-radius: 12px;
   background: var(--surface-2);
-  padding: 10px;
+  padding: 8px 10px 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -243,54 +243,93 @@ body {
 .custom-editor.hidden {
   display: none;
 }
-.custom-head {
+.custom-row-1 {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  color: var(--text);
-  font-size: 13px;
-}
-.custom-list {
-  display: flex;
-  flex-direction: column;
   gap: 8px;
-  max-height: 220px;
-  overflow: auto;
 }
-.custom-item {
-  border: 1px solid var(--hairline);
-  border-radius: 10px;
-  padding: 8px;
-  background: var(--surface-1);
+.custom-row-1 .pill-btn.small {
+  flex: 0 0 auto;
 }
-.custom-item-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-  color: var(--text-2);
+.custom-place-hint {
   font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
-.custom-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 8px;
+.custom-place-hint.hidden {
+  display: none;
 }
-.custom-grid label {
+#btn-custom-add.active {
+  background: var(--accent-soft);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.custom-labels-wrap {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  color: var(--muted);
   font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: -0.01em;
 }
-.custom-grid input[type='text'],
-.custom-grid input:not([type]) {
-  min-height: 28px;
-  border-radius: 8px;
-  border: 1px solid var(--hairline);
-  background: var(--surface-2);
+.custom-labels-in {
+  width: 100%;
+  min-height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface-1);
   color: var(--text);
-  padding: 4px 8px;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 6px 10px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  letter-spacing: 0.12em;
+}
+.custom-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 88px;
+  overflow-y: auto;
+}
+.custom-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.custom-chip-lab {
+  max-width: 42vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.custom-chip-del {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--warn);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  font-weight: 300;
+}
+.custom-chip-del:active {
+  background: rgba(255, 69, 58, 0.12);
 }
 
 .mini {
@@ -699,41 +738,113 @@ body {
   line-height: 1.35;
 }
 
-/* ---------- 第 2 步：模板列表 ---------- */
-.tpl-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--muted);
-  letter-spacing: -0.005em;
+/* ---------- 第 2 步：模板列表（横向分类 + 横向滑动模板名） ---------- */
+.sheet.sheet-tpl {
+  max-height: min(50vh, 420px);
+  gap: 8px;
+  padding-top: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
-.tpl-select {
-  width: 100%;
-  min-height: 38px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid var(--hairline-strong);
-  background: var(--surface-1);
-  color: var(--text);
+.tpl-panel-top {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: -4px -10px 6px;
+  padding: 6px 10px 10px;
+  background: linear-gradient(
+    180deg,
+    rgba(28, 28, 30, 0.99) 0%,
+    rgba(28, 28, 30, 0.98) 78%,
+    rgba(28, 28, 30, 0.82) 100%
+  );
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-bottom: 1px solid var(--hairline);
+}
+
+#panel-1-tip {
+  white-space: normal;
+  line-height: 1.45;
+  font-size: 11px;
+  padding: 0 2px 4px;
+  margin: 0;
+}
+
+.tpl-cat-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
+  margin: 0 -4px;
+  padding-left: 4px;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+.tpl-cat-row::-webkit-scrollbar {
+  height: 3px;
+}
+.tpl-cat-row::-webkit-scrollbar-thumb {
+  background: var(--hairline-strong);
+  border-radius: 4px;
+}
+
+.tpl-cat-btn {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text-2);
   font-family: inherit;
-  font-size: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.18s, color 0.18s, border-color 0.18s;
+}
+.tpl-cat-btn.active {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+
+.tpl-list-wrap {
+  margin: 0 -6px;
+  padding: 0 6px;
 }
 
 .tpl-list {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
-  max-height: 110px;
-  overflow-y: auto;
-  padding: 2px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 0 6px;
+  scrollbar-width: thin;
+  max-height: none;
+}
+.tpl-list::-webkit-scrollbar {
+  height: 4px;
+}
+.tpl-list::-webkit-scrollbar-thumb {
+  background: var(--hairline-strong);
+  border-radius: 4px;
 }
 
 .tpl-btn {
   flex: 0 0 auto;
-  min-height: 32px;
+  min-height: 30px;
+  max-width: min(46vw, 200px);
   padding: 6px 12px;
   border-radius: 999px;
   border: 1px solid var(--hairline);
@@ -745,6 +856,8 @@ body {
   letter-spacing: -0.005em;
   cursor: pointer;
   transition: background 0.18s, color 0.18s, border-color 0.18s;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tpl-btn.active {

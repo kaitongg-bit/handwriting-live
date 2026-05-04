@@ -34,6 +34,12 @@ export function circledSlotLabel(n: string | undefined, index: number): string {
   return CIRCLED[index] ?? String(index + 1);
 }
 
+/** 槽位展示用：直接显示 1、2、3 或用户输入字符，不用带圈序号 */
+export function plainSlotLabel(n: string | undefined, index: number): string {
+  if (n != null && String(n).trim() !== '') return String(n).trim();
+  return String(index + 1);
+}
+
 export function defaultPlacementForTemplate(t: PosterTemplate | undefined): Placement {
   if (!t) return { x: 28, y: 38, w: 44, h: 18 };
   if (t.category === 'square') return { x: 28, y: 24, w: 38, h: 38 };
@@ -71,7 +77,9 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
     selectable: false,
   });
   const circles = getCircleElements(template);
-  const ellipses: fabric.Ellipse[] = [];
+  const isCustom = template.id === 'custom';
+  /** 预制模板仅为椭圆；自定义为「椭圆 + 圈内序号」的可拖组合 Group */
+  const ellipses: fabric.Object[] = [];
   const labels: (fabric.Text | null)[] = [];
   const centers: { x: number; y: number; rx: number; ry: number }[] = [];
   for (let i = 0; i < circles.length; i++) {
@@ -80,10 +88,26 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
     const ly = el.cy * gh - gh / 2;
     const rxPx = el.rx * gw;
     const ryPx = el.ry * gh;
-    ellipses.push(
-      new fabric.Ellipse({
-        left: lx,
-        top: ly,
+    if (isCustom) {
+      const fs = Math.max(12, Math.min(28, Math.min(rxPx, ryPx) * 0.62));
+      const lab = plainSlotLabel(el.n, i);
+      const txt = new fabric.Text(lab, {
+        originX: 'center',
+        originY: 'center',
+        left: 0,
+        top: 0,
+        fontSize: fs,
+        fill: '#e32219',
+        fontFamily: 'Inter Tight, Inter, PingFang SC, sans-serif',
+        fontWeight: 700,
+        textAlign: 'center',
+        lineHeight: 1,
+        evented: false,
+        selectable: false,
+      });
+      const ellipse = new fabric.Ellipse({
+        left: 0,
+        top: 0,
         rx: rxPx,
         ry: ryPx,
         originX: 'center',
@@ -91,12 +115,49 @@ export function buildPosterTemplateParts(template: PosterTemplate, gw: number, g
         fill: 'rgba(0,0,0,0)',
         stroke: '#e32219',
         strokeDashArray: [5, 4],
+        strokeUniform: true,
         evented: false,
         selectable: false,
-      })
-    );
-    /** 画布上的圈内序号会干扰视觉；序号仅保留在槽位按钮里。 */
-    labels.push(null);
+      });
+      /** 不要用 padding：会使选中框远大于椭圆，数字看起来像跑偏且控制点在框角不在圆边 */
+      const slotGrp = new fabric.Group([ellipse, txt], {
+        left: lx,
+        top: ly,
+        originX: 'center',
+        originY: 'center',
+        subTargetCheck: false,
+        lockRotation: true,
+        lockScalingX: false,
+        lockScalingY: false,
+        lockScalingFlip: true,
+        /** 圆位在画布顶层单独成组时可用圆心锚缩放，与调字模式一致 */
+        centeredScaling: true,
+        borderColor: '#ff9f0a',
+        cornerColor: '#ff9f0a',
+        cornerStyle: 'circle',
+        transparentCorners: false,
+      });
+      (slotGrp as { customSlotIndex?: number }).customSlotIndex = i;
+      ellipses.push(slotGrp);
+      labels.push(null);
+    } else {
+      ellipses.push(
+        new fabric.Ellipse({
+          left: lx,
+          top: ly,
+          rx: rxPx,
+          ry: ryPx,
+          originX: 'center',
+          originY: 'center',
+          fill: 'rgba(0,0,0,0)',
+          stroke: '#e32219',
+          strokeDashArray: [5, 4],
+          evented: false,
+          selectable: false,
+        })
+      );
+      labels.push(null);
+    }
     centers.push({ x: lx, y: ly, rx: rxPx, ry: ryPx });
   }
   return { frame, ellipses, labels, centers };

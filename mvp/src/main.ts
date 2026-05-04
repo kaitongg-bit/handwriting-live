@@ -18,7 +18,7 @@ import {
   buildPosterTemplateParts,
   fabricGroupOpts,
   loadImageForSlot,
-  circledSlotLabel,
+  plainSlotLabel,
 } from './posterTemplateFabric';
 import type { PosterTemplate, PosterCircleEl } from './posterTemplateFabric';
 import { BRUSHES, applyBrush, postProcessPath, createNoisePattern } from './brushes';
@@ -48,6 +48,8 @@ const drawHistory: fabric.Object[] = [];
 let currentSlot = 0;
 /** 槽位参考字 fabric.Image，与 slotUrls 同索引；从 templateGroup 解引用便于交互配置 */
 let slotFabricImages: (fabric.Image | null)[] = [];
+/** 自定义模板：圆位 Group 画布顶层（与海报 Group 分离），交互与第 2 步调字一致 */
+let customSlotOverlayGroups: fabric.Group[] = [];
 /** 第 3 步（面板）：poster＝拖整张模板；slot＝单独缩放/平移圈内参考字图 */
 let step2CanvasMode: 'poster' | 'slot' = 'poster';
 /** 第 4 步：选中笔画做缩放旋转（非节点级编辑） */
@@ -61,16 +63,14 @@ const pendingTracePaths: fabric.Object[] = [];
 /** 有邪修图的槽位索引顺序 */
 let traceSlotOrder: number[] = [];
 let traceCursor = 0;
+/** 自定义模板：点了「＋圆位」后，下一次在红框内点击将落点新圆 */
+let customPlaceNext = false;
 
+/** 自定义模板允许从 0 个圆开始，用「＋圆位 → 点画布」逐个添加 */
 function normalizeCustomTemplate() {
   const circles = customTemplate.elements.filter((e) => e.type === 'circle') as PosterCircleEl[];
   if (!circles.length) {
-    customTemplate.elements = [
-      { id: 'custom-c1', type: 'circle', n: '1', cx: 0.32, cy: 0.4, rx: 0.12, ry: 0.12 },
-      { id: 'custom-c2', type: 'circle', n: '2', cx: 0.52, cy: 0.5, rx: 0.12, ry: 0.12 },
-      { id: 'custom-c3', type: 'circle', n: '3', cx: 0.72, cy: 0.4, rx: 0.12, ry: 0.12 },
-      { id: 'custom-c4', type: 'circle', n: '4', cx: 0.5, cy: 0.7, rx: 0.12, ry: 0.12 },
-    ];
+    customTemplate.elements = [];
     return;
   }
   customTemplate.elements = circles.map((c, i) => ({
@@ -93,6 +93,26 @@ const warpState = {
 
 const el = (id: string) => document.getElementById(id)!;
 
+function getTplCategory(): string {
+  const a = document.querySelector('.tpl-cat-btn.active') as HTMLElement | null;
+  return a?.dataset.cat || 'all';
+}
+
+function syncTplCatButtons(cat: string) {
+  document.querySelectorAll('.tpl-cat-btn').forEach((b) => {
+    b.classList.toggle('active', (b as HTMLElement).dataset.cat === cat);
+  });
+}
+
+function updatePanel1Tip() {
+  const tip = document.getElementById('panel-1-tip');
+  if (!tip || step !== 1) return;
+  tip.textContent =
+    selectedPosterTemplate.id === 'custom'
+      ? '＋圆位后点红框落圆；拖橙框移圆，拖四角等比缩放，拖四边中点单独改宽窄/高低。数字连写如 12345。拖虚线框移整张 · 双指缩放'
+      : '左右滑动选模板 · 拖红框移动 · 双指缩放';
+}
+
 function getSelectedWarpFont() {
   return (el('warp-font') as HTMLSelectElement).value;
 }
@@ -111,6 +131,11 @@ function toast(msg: string) {
 
 function setStep(n: number) {
   step = Math.max(0, Math.min(3, n));
+  if (step !== 1) {
+    customPlaceNext = false;
+    el('btn-custom-add')?.classList.remove('active');
+    el('custom-place-hint')?.classList.add('hidden');
+  }
   if (step !== 3) {
     pathEditMode = false;
   }
@@ -138,6 +163,7 @@ function setStep(n: number) {
   ];
   el('step-title').textContent = titles[step];
   el('step-hint').textContent = hints[step];
+  updatePanel1Tip();
   if (step === 2) rebuildSlotButtons();
 
   const back = el('btn-back');
@@ -157,7 +183,11 @@ function resizeCanvas() {
   const wrap = el('stage-wrap');
   const r = wrap.getBoundingClientRect();
   canvas.setDimensions({ width: Math.max(200, r.width), height: Math.max(200, r.height) });
-  canvas.renderAll();
+  if (templateGroup && selectedPosterTemplate.id === 'custom') {
+    positionCustomSlotOverlaysFromData();
+  } else {
+    canvas.renderAll();
+  }
   if (traceModalOpen && traceCanvas) {
     syncTraceCanvasSize();
     traceCanvas.renderAll();
@@ -204,7 +234,8 @@ function applyStepMode() {
   else attachSlotImagesToGroup();
   if (templateGroup) {
     if (step <= 1) {
-      const movePoster = step === 1;
+      const placeMode = step === 1 && selectedPosterTemplate.id === 'custom' && customPlaceNext;
+      const movePoster = step === 1 && !placeMode;
       templateGroup.evented = movePoster;
       templateGroup.selectable = movePoster;
     } else if (step === 2) {
@@ -215,6 +246,7 @@ function applyStepMode() {
       templateGroup.evented = false;
       templateGroup.selectable = false;
     }
+    applyCustomSlotInteraction();
   }
   applySlotImagesInteraction();
   applyPathObjectsInteraction();
@@ -225,6 +257,12 @@ function applyStepMode() {
       canvas.set({ cornerSize: 16, touchCornerSize: 28 });
     } else if (step === 3 && pathEditMode) {
       canvas.set({ cornerSize: 16, touchCornerSize: 28 });
+    } else if (
+      selectedPosterTemplate.id === 'custom' &&
+      (step === 1 || (step === 2 && step2CanvasMode === 'poster'))
+    ) {
+      /** 自定义圆：角点与边中点缩放，触控加大便于命中 */
+      canvas.set({ cornerSize: 18, touchCornerSize: 40 });
     } else {
       canvas.set({ cornerSize: 12, touchCornerSize: 20 });
     }
@@ -245,6 +283,254 @@ function applyPathObjectsInteraction() {
     if (!canvas.getObjects().includes(obj)) return;
     obj.set({ selectable: allow, evented: true });
   });
+}
+
+function clearCustomSlotOverlaysFromCanvas() {
+  if (!canvas) return;
+  customSlotOverlayGroups.forEach((g) => {
+    if (canvas.getObjects().includes(g)) canvas.remove(g);
+  });
+  customSlotOverlayGroups = [];
+}
+
+function unbindTemplateGroupLayoutSync() {
+  if (!templateGroup) return;
+  templateGroup.off('moving', onTemplateGroupTransformForOverlays);
+  templateGroup.off('scaling', onTemplateGroupTransformForOverlays);
+  templateGroup.off('rotating', onTemplateGroupTransformForOverlays);
+  templateGroup.off('modified', onTemplateGroupTransformForOverlays);
+}
+
+function onTemplateGroupTransformForOverlays() {
+  positionCustomSlotOverlaysFromData();
+}
+
+function bindTemplateGroupLayoutSync() {
+  unbindTemplateGroupLayoutSync();
+  if (!templateGroup || selectedPosterTemplate.id !== 'custom') return;
+  templateGroup.on('moving', onTemplateGroupTransformForOverlays);
+  templateGroup.on('scaling', onTemplateGroupTransformForOverlays);
+  templateGroup.on('rotating', onTemplateGroupTransformForOverlays);
+  templateGroup.on('modified', onTemplateGroupTransformForOverlays);
+}
+
+/** 数据驱动：红框变换后把顶层圆位与（脱组的）字图摆回正确屏幕位置 */
+function positionCustomSlotOverlaysFromData() {
+  if (!templateGroup || selectedPosterTemplate.id !== 'custom' || !canvas) return;
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  const { gw, gh } = placementBoxPx(placement, cw, ch);
+  const M = templateGroup.calcTransformMatrix();
+  const circles = getCircleElements(customTemplate) as PosterCircleEl[];
+  const tg = templateGroup;
+
+  customSlotOverlayGroups.forEach((slotGrp, i) => {
+    const c = circles[i];
+    if (!c) return;
+    const lx = c.cx * gw - gw / 2;
+    const ly = c.cy * gh - gh / 2;
+    const pt = fabric.util.transformPoint(new fabric.Point(lx, ly), M);
+    const rxPx = c.rx * gw;
+    const ryPx = c.ry * gh;
+    const fs = Math.max(12, Math.min(28, Math.min(rxPx, ryPx) * 0.62));
+    slotGrp.set({
+      left: pt.x,
+      top: pt.y,
+      angle: tg.angle ?? 0,
+      scaleX: tg.scaleX ?? 1,
+      scaleY: tg.scaleY ?? 1,
+      skewX: tg.skewX ?? 0,
+      skewY: tg.skewY ?? 0,
+      originX: 'center',
+      originY: 'center',
+    });
+    const subs = slotGrp.getObjects();
+    const ell = subs[0] as fabric.Ellipse | undefined;
+    const txt = subs.find((x) => x.type === 'text') as fabric.Text | undefined;
+    if (ell && ell.type === 'ellipse') {
+      ell.set({ rx: rxPx, ry: ryPx });
+    }
+    if (txt) {
+      txt.set({ text: plainSlotLabel(c.n, i), fontSize: fs });
+    }
+    slotGrp.setCoords();
+  });
+
+  layoutCustomSlotImagesWorldFromData();
+  canvas.requestRenderAll();
+}
+
+/** 参考字图在红框外顶层时，随红框矩阵对齐（组内子对象由 Fabric 自己跟父级走） */
+function layoutCustomSlotImagesWorldFromData() {
+  if (!templateGroup || selectedPosterTemplate.id !== 'custom' || !canvas) return;
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  const { gw, gh } = placementBoxPx(placement, cw, ch);
+  const M = templateGroup.calcTransformMatrix();
+  const circles = getCircleElements(customTemplate) as PosterCircleEl[];
+  const tg = templateGroup;
+  const tgsx = tg.scaleX ?? 1;
+  const tgsy = tg.scaleY ?? 1;
+
+  slotFabricImages.forEach((img, i) => {
+    if (!img) return;
+    if (templateGroup.contains(img)) return;
+    const c = circles[i];
+    if (!c) return;
+    const lx = c.cx * gw - gw / 2;
+    const ly = c.cy * gh - gh / 2;
+    const pt = fabric.util.transformPoint(new fabric.Point(lx, ly), M);
+    const ext = img as fabric.Image & { __baseFitScX?: number; __baseFitScY?: number };
+    let bx = ext.__baseFitScX;
+    let by = ext.__baseFitScY;
+    if (bx == null || by == null) {
+      bx = (img.scaleX || 1) / tgsx;
+      by = (img.scaleY || 1) / tgsy;
+      ext.__baseFitScX = bx;
+      ext.__baseFitScY = by;
+    }
+    img.set({
+      left: pt.x,
+      top: pt.y,
+      angle: tg.angle ?? 0,
+      scaleX: bx * tgsx,
+      scaleY: by * tgsy,
+      originX: 'center',
+      originY: 'center',
+    });
+    img.setCoords();
+  });
+}
+
+function canvasSlotCenterToNormalized(grp: fabric.Group) {
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  const { gw, gh } = placementBoxPx(placement, cw, ch);
+  if (!templateGroup) return { cx: 0.5, cy: 0.5 };
+  const inv = fabric.util.invertTransform(templateGroup.calcTransformMatrix());
+  const local = fabric.util.transformPoint(new fabric.Point(grp.left ?? 0, grp.top ?? 0), inv);
+  return {
+    cx: Math.max(0.04, Math.min(0.96, (local.x + gw / 2) / gw)),
+    cy: Math.max(0.04, Math.min(0.96, (local.y + gh / 2) / gh)),
+  };
+}
+
+/** 自定义：圆位在画布顶层，红框单独 templateGroup；拖圆与拖框分开 */
+function applyCustomSlotInteraction() {
+  if (!templateGroup || selectedPosterTemplate.id !== 'custom') return;
+  const placeMode = step === 1 && customPlaceNext;
+  const canMoveSlots =
+    !placeMode && (step === 1 || (step === 2 && step2CanvasMode === 'poster'));
+  customSlotOverlayGroups.forEach((g) => {
+    g.set({
+      selectable: canMoveSlots,
+      evented: canMoveSlots,
+      hasBorders: canMoveSlots,
+      hasControls: canMoveSlots,
+      lockScalingX: false,
+      lockScalingY: false,
+    });
+    if (canMoveSlots) {
+      g.setControlsVisibility({
+        tl: true,
+        tr: true,
+        bl: true,
+        br: true,
+        ml: true,
+        mt: true,
+        mr: true,
+        mb: true,
+        mtr: false,
+      });
+    }
+    g.setCoords();
+  });
+}
+
+function isCustomSlotGroup(o: fabric.Object | null | undefined): o is fabric.Object & {
+  customSlotIndex: number;
+} {
+  return o != null && (o as fabric.Object & { customSlotIndex?: number }).customSlotIndex != null;
+}
+
+/** 嵌套 Group 选中后需重算 oCoords，否则四角控制点会堆在左上角 */
+function refreshActiveCustomSlotCoords() {
+  if (!canvas) return;
+  const a = canvas.getActiveObject();
+  if (!isCustomSlotGroup(a)) return;
+  a.setCoords();
+  canvas.requestRenderAll();
+}
+
+function refreshAllCustomSlotGroupsCoords() {
+  if (!canvas || selectedPosterTemplate.id !== 'custom') return;
+  customSlotOverlayGroups.forEach((g) => g.setCoords());
+  canvas.requestRenderAll();
+}
+
+function onCustomSlotGroupModified(obj: fabric.Object) {
+  const idx = (obj as fabric.Object & { customSlotIndex?: number }).customSlotIndex;
+  if (idx == null || selectedPosterTemplate.id !== 'custom') return;
+  if (!(step === 1 || (step === 2 && step2CanvasMode === 'poster'))) return;
+  const circles = getCircleElements(customTemplate) as PosterCircleEl[];
+  const c = circles[idx];
+  if (!c) return;
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  const { gw, gh } = placementBoxPx(placement, cw, ch);
+  const grp = obj as fabric.Group;
+  const tgsx = templateGroup?.scaleX ?? 1;
+  const tgsy = templateGroup?.scaleY ?? 1;
+  const sx = grp.scaleX ?? 1;
+  const sy = grp.scaleY ?? 1;
+  const relX = sx / tgsx;
+  const relY = sy / tgsy;
+  const subs = grp.getObjects();
+  const ell = subs[0] as fabric.Ellipse | undefined;
+  const txt = subs.find((x) => x.type === 'text') as fabric.Text | undefined;
+  const scaled = Math.abs(relX - 1) > 0.002 || Math.abs(relY - 1) > 0.002;
+  if (scaled && ell && ell.type === 'ellipse') {
+    /** 四角常为等比（relX≈relY）；拖四边中点时单独改变 rx / ry */
+    let nrx = (ell.rx ?? 0) * relX;
+    let nry = (ell.ry ?? 0) * relY;
+    nrx = Math.max(gw * 0.03, Math.min(gw * 0.48, nrx));
+    nry = Math.max(gh * 0.03, Math.min(gh * 0.48, nry));
+    c.rx = nrx / gw;
+    c.ry = nry / gh;
+    grp.set({ scaleX: tgsx, scaleY: tgsy });
+    ell.set({ rx: nrx, ry: nry });
+    if (txt) {
+      const fs = Math.max(10, Math.min(30, Math.min(nrx, nry) * 0.62));
+      txt.set({ fontSize: fs });
+    }
+    grp.setCoords();
+  }
+  const { cx, cy } = canvasSlotCenterToNormalized(grp);
+  c.cx = cx;
+  c.cy = cy;
+  customTemplate.elements = circles;
+  selectedPosterTemplate = customTemplate;
+  positionCustomSlotOverlaysFromData();
+}
+
+/** 仅更新圈内文字（改槽位序号输入时，避免整组重建） */
+function syncCustomSlotLabelTexts() {
+  if (!templateGroup || selectedPosterTemplate.id !== 'custom') return;
+  const circles = getCircleElements(customTemplate);
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  const { gw, gh } = placementBoxPx(placement, cw, ch);
+  customSlotOverlayGroups.forEach((grp, idx) => {
+    const txt = grp.getObjects().find((x) => x.type === 'text') as fabric.Text | undefined;
+    if (!txt) return;
+    const c = circles[idx];
+    if (!c) return;
+    const rxPx = c.rx * gw;
+    const ryPx = c.ry * gh;
+    const fs = Math.max(12, Math.min(28, Math.min(rxPx, ryPx) * 0.62));
+    txt.set({ text: plainSlotLabel(c.n, idx), fontSize: fs });
+  });
+  canvas.requestRenderAll();
 }
 
 function applySlotImagesInteraction() {
@@ -332,10 +618,19 @@ function applyRefOpacity() {
   if (!templateGroup) return;
   if (step !== 3) {
     templateGroup.set({ opacity: 1 });
+    if (selectedPosterTemplate.id === 'custom') {
+      customSlotOverlayGroups.forEach((g) => g.set({ opacity: 1 }));
+      slotFabricImages.forEach((im) => im && im.set({ opacity: 1 }));
+    }
     return;
   }
   /** 第 4 步：开 = 极淡（不抢戏），关 = 完全不可见 */
-  templateGroup.set({ opacity: refVisible ? 0.28 : 0 });
+  const o = refVisible ? 0.28 : 0;
+  templateGroup.set({ opacity: o });
+  if (selectedPosterTemplate.id === 'custom') {
+    customSlotOverlayGroups.forEach((g) => g.set({ opacity: o }));
+    slotFabricImages.forEach((im) => im && im.set({ opacity: o }));
+  }
 }
 
 function ensureBgSolid() {
@@ -395,7 +690,7 @@ function setBgFromFile(file: File) {
 }
 
 function filteredTemplates() {
-  const cat = (el('tpl-category') as HTMLSelectElement).value;
+  const cat = getTplCategory();
   return POSTER_TEMPLATES.filter((t) => cat === 'all' || t.category === cat);
 }
 
@@ -406,7 +701,7 @@ function renderTplList() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'tpl-btn' + (t.id === selectedPosterTemplate.id ? ' active' : '');
-    btn.textContent = t.name;
+    btn.textContent = t.id === 'custom' ? '圆位布局' : t.name;
     btn.dataset.tid = t.id;
     list.appendChild(btn);
   });
@@ -421,41 +716,93 @@ function renderCustomEditor() {
   if (!visible) return;
   normalizeCustomTemplate();
   const circles = getCircleElements(customTemplate);
+  const labelsIn = el('custom-labels') as HTMLInputElement;
+  const typing = document.activeElement === labelsIn;
+  const selA = labelsIn.selectionStart;
+  const selB = labelsIn.selectionEnd;
+  if (!typing) labelsIn.value = circles.map((c) => String(c.n ?? '')).join('');
   list.innerHTML = circles
     .map(
       (c, i) => `
-      <div class="custom-item" data-idx="${i}">
-        <div class="custom-item-head">
-          <span>圆位 ${i + 1}</span>
-          <button type="button" class="pill-btn warn custom-del" data-idx="${i}">删</button>
-        </div>
-        <div class="custom-grid">
-          <label>名<input data-k="n" data-idx="${i}" value="${String(c.n ?? i + 1)}" /></label>
-          <label>X<input type="range" min="6" max="94" data-k="cx" data-idx="${i}" value="${Math.round(
-            c.cx * 100,
-          )}" /></label>
-          <label>Y<input type="range" min="6" max="94" data-k="cy" data-idx="${i}" value="${Math.round(
-            c.cy * 100,
-          )}" /></label>
-          <label>宽<input type="range" min="3" max="40" data-k="rx" data-idx="${i}" value="${Math.round(
-            c.rx * 100,
-          )}" /></label>
-          <label>高<input type="range" min="3" max="40" data-k="ry" data-idx="${i}" value="${Math.round(
-            c.ry * 100,
-          )}" /></label>
-        </div>
+      <div class="custom-chip" data-idx="${i}">
+        <span class="custom-chip-lab">${plainSlotLabel(c.n, i)}</span>
+        <button type="button" class="custom-chip-del" data-idx="${i}" aria-label="删除">×</button>
       </div>`
     )
     .join('');
+  if (typing && typeof selA === 'number' && typeof selB === 'number') {
+    labelsIn.focus();
+    labelsIn.setSelectionRange(selA, selB);
+  }
 }
 
-function refreshCustomTemplateOnCanvas() {
+function refreshCustomTemplateOnCanvas(preserveTransform = false) {
   normalizeCustomTemplate();
   if (selectedPosterTemplate.id !== 'custom') return;
   selectedPosterTemplate = customTemplate;
   syncSlotsForTemplateChange(false);
-  if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
+  if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(preserveTransform);
   renderCustomEditor();
+}
+
+function setCustomPlaceNext(on: boolean) {
+  customPlaceNext = on;
+  const b = el('btn-custom-add');
+  if (b) b.classList.toggle('active', on);
+  const hint = el('custom-place-hint');
+  if (hint) hint.classList.toggle('hidden', !on);
+  applyStepMode();
+}
+
+function pointerToCustomNorm(e: Event): { cx: number; cy: number } | null {
+  if (!templateGroup || !canvas) return null;
+  const p = canvas.getPointer(e);
+  const inv = fabric.util.invertTransform(templateGroup.calcTransformMatrix());
+  const pt = fabric.util.transformPoint(new fabric.Point(p.x, p.y), inv);
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  const { gw, gh } = placementBoxPx(placement, cw, ch);
+  const halfW = gw / 2;
+  const halfH = gh / 2;
+  if (pt.x < -halfW || pt.x > halfW || pt.y < -halfH || pt.y > halfH) return null;
+  return {
+    cx: Math.max(0.06, Math.min(0.94, (pt.x + halfW) / gw)),
+    cy: Math.max(0.06, Math.min(0.94, (pt.y + halfH) / gh)),
+  };
+}
+
+function tryConsumeCustomPlace(opt: { e?: Event }): boolean {
+  if (step !== 1 || selectedPosterTemplate.id !== 'custom' || !customPlaceNext || !templateGroup)
+    return false;
+  const e = opt.e;
+  if (!e) return false;
+  const norm = pointerToCustomNorm(e);
+  if (!norm) {
+    toast('请在红框虚线内点击');
+    setCustomPlaceNext(false);
+    return true;
+  }
+  const circles = getCircleElements(customTemplate);
+  const k = circles.length + 1;
+  const last = circles[circles.length - 1];
+  const r = last
+    ? Math.max(0.05, Math.min(0.22, last.rx || 0.11))
+    : 0.11;
+  customTemplate.elements.push({
+    id: `custom-c${Date.now()}`,
+    type: 'circle',
+    n: String(k),
+    cx: norm.cx,
+    cy: norm.cy,
+    rx: r,
+    ry: r,
+  });
+  selectedPosterTemplate = customTemplate;
+  setCustomPlaceNext(false);
+  canvas.discardActiveObject();
+  refreshCustomTemplateOnCanvas(true);
+  toast('已添加圆位；可继续「＋圆位」');
+  return true;
 }
 
 function syncSlotsForTemplateChange(clearUrls: boolean) {
@@ -486,7 +833,7 @@ function rebuildSlotButtons() {
     b.type = 'button';
     b.className = 'slot-btn' + (i === currentSlot ? ' active' : '');
     b.dataset.slot = String(i);
-    b.textContent = `字${circledSlotLabel(ce.n, i)}`;
+    b.textContent = `字${plainSlotLabel(ce.n, i)}`;
     row.appendChild(b);
   });
 }
@@ -500,6 +847,8 @@ function clearTopLevelSlotImages() {
 
 function createTemplateGroup(preserveTransform = false) {
   if (!canvas) return;
+  if (templateGroup) unbindTemplateGroupLayoutSync();
+  clearCustomSlotOverlaysFromCanvas();
   clearTopLevelSlotImages();
   slotFabricImages = [];
   const cw = canvas.width!;
@@ -522,9 +871,11 @@ function createTemplateGroup(preserveTransform = false) {
   const { cx, cy, gw, gh } = placementBoxPx(placement, cw, ch);
   const { frame, ellipses, labels } = buildPosterTemplateParts(selectedPosterTemplate, gw, gh);
   const parts: fabric.Object[] = [frame];
-  for (let i = 0; i < ellipses.length; i++) {
-    parts.push(ellipses[i]);
-    if (labels[i]) parts.push(labels[i] as fabric.Object);
+  if (selectedPosterTemplate.id !== 'custom') {
+    for (let i = 0; i < ellipses.length; i++) {
+      parts.push(ellipses[i]);
+      if (labels[i]) parts.push(labels[i] as fabric.Object);
+    }
   }
   const g = new fabric.Group(
     parts,
@@ -539,6 +890,14 @@ function createTemplateGroup(preserveTransform = false) {
   g.setControlsVisibility({ mtr: true });
   canvas.add(g);
   templateGroup = g;
+  if (selectedPosterTemplate.id === 'custom') {
+    ellipses.forEach((slotGrp) => {
+      canvas.add(slotGrp as fabric.Group);
+      customSlotOverlayGroups.push(slotGrp as fabric.Group);
+    });
+    positionCustomSlotOverlaysFromData();
+    bindTemplateGroupLayoutSync();
+  }
   applyStepMode();
   canvas.renderAll();
 }
@@ -554,6 +913,8 @@ function rebuildTemplateWithImages(cb?: () => void) {
     return;
   }
   const { left, top, scaleX, scaleY, angle } = templateGroup;
+  unbindTemplateGroupLayoutSync();
+  clearCustomSlotOverlaysFromCanvas();
   clearTopLevelSlotImages();
   canvas.remove(templateGroup);
 
@@ -566,6 +927,33 @@ function rebuildTemplateWithImages(cb?: () => void) {
   Promise.all(centers.map((c, i) => loadImageForSlot(slotUrls[i] ?? null, c, transparentPixel()))).then(
     (imgs) => {
       slotFabricImages = new Array(ellipses.length).fill(null);
+      if (selectedPosterTemplate.id === 'custom') {
+        customSlotOverlayGroups = [];
+        const g = new fabric.Group([frame], fabricGroupOpts({ left, top, scaleX, scaleY, angle }));
+        g.setControlsVisibility({ mtr: true });
+        canvas.add(g);
+        templateGroup = g;
+        for (let i = 0; i < ellipses.length; i++) {
+          const im = imgs[i];
+          const slotGrp = ellipses[i] as fabric.Group;
+          if (im) {
+            configureSlotFabricImage(im, i);
+            slotFabricImages[i] = im;
+            canvas.add(im);
+            const ext = im as fabric.Image & { __baseFitScX?: number; __baseFitScY?: number };
+            ext.__baseFitScX = im.scaleX ?? 1;
+            ext.__baseFitScY = im.scaleY ?? 1;
+          }
+          canvas.add(slotGrp);
+          customSlotOverlayGroups.push(slotGrp);
+        }
+        positionCustomSlotOverlaysFromData();
+        bindTemplateGroupLayoutSync();
+        applyStepMode();
+        canvas.renderAll();
+        cb?.();
+        return;
+      }
       const objs: fabric.Object[] = [frame];
       for (let i = 0; i < ellipses.length; i++) {
         const im = imgs[i];
@@ -642,7 +1030,7 @@ function confirmWarp() {
   const url = out.toDataURL('image/png');
   slotUrls[currentSlot] = url;
   const circles = getCircleElements(selectedPosterTemplate);
-  const lab = circledSlotLabel(circles[currentSlot]?.n, currentSlot);
+  const lab = plainSlotLabel(circles[currentSlot]?.n, currentSlot);
   rebuildTemplateWithImages(() => {
     toast(`字${lab} 已更新`);
     closeWarpModal();
@@ -1336,7 +1724,7 @@ function rebrushOne(
   return next;
 }
 
-type ReplayFx = 'dash' | 'drop' | 'shake' | 'erase';
+type ReplayFx = 'dash' | 'drop' | 'shake' | 'squash' | 'erase';
 
 function dashAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
   return new Promise((resolve) => {
@@ -1431,6 +1819,45 @@ function shakeAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
   });
 }
 
+/** 全体可读作「压扁再弹起」：纵向压扁 + 略横向拉伸，再回弹，并带轻微横向余抖 */
+function squashAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
+  return new Promise((resolve) => {
+    const sx0 = obj.scaleX || 1;
+    const sy0 = obj.scaleY || 1;
+    const left0 = obj.left ?? 0;
+    const amp = Math.max(2, Math.min(8, (obj.strokeWidth as number) || 5));
+    obj.set({ opacity: 0, scaleX: sx0 * 1.12, scaleY: sy0 * 0.46, left: left0 });
+    const opDur = Math.max(90, Math.floor(dur * 0.18));
+    obj.animate('opacity', 1, { duration: opDur, onChange: () => canvas.renderAll() });
+    obj.animate('scaleX', sx0, {
+      duration: dur,
+      easing: fabric.util.ease.easeOutBack,
+      onChange: () => canvas.renderAll(),
+    });
+    obj.animate('scaleY', sy0, {
+      duration: dur,
+      easing: fabric.util.ease.easeOutBack,
+      onChange: () => canvas.renderAll(),
+    });
+    fabric.util.animate({
+      startValue: 0,
+      endValue: 1,
+      duration: dur,
+      easing: fabric.util.ease.easeOutSine,
+      onChange: (t: number) => {
+        const decay = 1 - t;
+        obj.set({ left: left0 + Math.sin(t * 18 * Math.PI) * amp * decay * 0.9 });
+        canvas.renderAll();
+      },
+      onComplete: () => {
+        obj.set({ left: left0, scaleX: sx0, scaleY: sy0 });
+        canvas.renderAll();
+        resolve();
+      },
+    });
+  });
+}
+
 function eraseInAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
   return new Promise((resolve) => {
     const b = obj.getBoundingRect(true, true);
@@ -1460,6 +1887,7 @@ function eraseInAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
 function animateObjectByFx(obj: fabric.Object, dur: number, fx: ReplayFx): Promise<void> {
   if (fx === 'drop') return dropAnimateObject(obj, dur);
   if (fx === 'shake') return shakeAnimateObject(obj, dur);
+  if (fx === 'squash') return squashAnimateObject(obj, dur);
   if (fx === 'erase') return eraseInAnimateObject(obj, dur);
   return dashAnimateObject(obj, dur);
 }
@@ -1467,11 +1895,32 @@ function animateObjectByFx(obj: fabric.Object, dur: number, fx: ReplayFx): Promi
 /** Live Photo 风格：整段约 3 秒；按笔画/按字均分。stroke/char 模式下用 dash 动画。 */
 const LIVE_TARGET_MS = 3200;
 
+function playbackModeFromReplay(replay: string): 'stroke' | 'char' | 'char-sync' {
+  if (replay === 'char-sync') return 'char-sync';
+  if (replay === 'char') return 'char';
+  return 'stroke';
+}
+
 async function runExportPlayback(
   paths: fabric.Object[],
-  mode: 'stroke' | 'char' = 'stroke',
+  mode: 'stroke' | 'char' | 'char-sync' = 'stroke',
   fx: ReplayFx = 'dash'
 ) {
+  if (mode === 'char-sync') {
+    const bucket = new Map<number, fabric.Object[]>();
+    for (const p of paths) {
+      const k = (p as fabric.Object & { __slotIndex?: number }).__slotIndex;
+      const key = k != null ? k : 998;
+      if (!bucket.has(key)) bucket.set(key, []);
+      bucket.get(key)!.push(p);
+    }
+    const keys = [...bucket.keys()].sort((a, b) => a - b);
+    const all = keys.flatMap((k) => bucket.get(k)!);
+    if (!all.length) return;
+    const dur = Math.max(360, Math.min(2800, LIVE_TARGET_MS - 160));
+    await Promise.all(all.map((o) => animateObjectByFx(o, dur, fx)));
+    return;
+  }
   if (mode === 'char') {
     const bucket = new Map<number, fabric.Object[]>();
     for (const p of paths) {
@@ -1532,6 +1981,57 @@ async function runSilentPopIn() {
       });
     });
   }
+}
+
+/** 不写直出：所有槽位字图同一时段压扁弹入（非逐个蹦出） */
+async function runSilentSquashTogether() {
+  const ordered = slotFabricImages
+    .map((im, i) => ({ im, i }))
+    .filter((x) => !!x.im && !!slotUrls[x.i]) as { im: fabric.Image; i: number }[];
+  if (!ordered.length) return;
+  const dur = Math.max(420, Math.min(2600, LIVE_TARGET_MS - 180));
+  await Promise.all(
+    ordered.map(
+      ({ im }) =>
+        new Promise<void>((resolve) => {
+          const sx = im.scaleX || 1;
+          const sy = im.scaleY || 1;
+          const left0 = im.left ?? 0;
+          const amp = 5;
+          im.set({ scaleX: sx * 1.1, scaleY: sy * 0.48, opacity: 0, left: left0 });
+          im.animate('opacity', 1, {
+            duration: Math.floor(dur * 0.2),
+            onChange: () => canvas.renderAll(),
+          });
+          im.animate('scaleX', sx, {
+            duration: dur,
+            easing: fabric.util.ease.easeOutBack,
+            onChange: () => canvas.renderAll(),
+          });
+          im.animate('scaleY', sy, {
+            duration: dur,
+            easing: fabric.util.ease.easeOutBack,
+            onChange: () => canvas.renderAll(),
+          });
+          fabric.util.animate({
+            startValue: 0,
+            endValue: 1,
+            duration: dur,
+            easing: fabric.util.ease.easeOutSine,
+            onChange: (t: number) => {
+              const decay = 1 - t;
+              im.set({ left: left0 + Math.sin(t * 16 * Math.PI) * amp * decay });
+              canvas.renderAll();
+            },
+            onComplete: () => {
+              im.set({ left: left0, scaleX: sx, scaleY: sy });
+              canvas.renderAll();
+              resolve();
+            },
+          });
+        }),
+    ),
+  );
 }
 
 /* ---------- 视频编码（WebCodecs + mp4-muxer，苹果相册友好的 H.264 MP4） ---------- */
@@ -1645,9 +2145,14 @@ async function encodeWithWebCodecs(
 
 /* ---------- 导出视频 ---------- */
 async function exportVideo() {
-  const replay = (el('replay-mode') as HTMLSelectElement).value as 'stroke' | 'char' | 'silent';
+  const replay = (el('replay-mode') as HTMLSelectElement).value as
+    | 'stroke'
+    | 'char'
+    | 'char-sync'
+    | 'silent'
+    | 'silent-sync';
   const fx = (el('replay-fx') as HTMLSelectElement).value as ReplayFx;
-  const isSilent = replay === 'silent';
+  const isSilent = replay === 'silent' || replay === 'silent-sync';
   if (!isSilent && drawHistory.length === 0) {
     toast('请先写几笔，或在「回放」里选择「不写直出」');
     return;
@@ -1670,12 +2175,18 @@ async function exportVideo() {
   if (isSilent) {
     detachSlotImagesFromGroup();
     if (templateGroup) templateGroup.set({ opacity: 0 });
+    if (selectedPosterTemplate.id === 'custom') {
+      customSlotOverlayGroups.forEach((g) => g.set({ opacity: 0 }));
+    }
     savedScales = slotFabricImages
       .filter((im): im is fabric.Image => !!im)
       .map((im) => ({ im, sx: im.scaleX || 1, sy: im.scaleY || 1, op: im.opacity ?? 1 }));
     savedScales.forEach((s) => s.im.set({ opacity: 0 }));
   } else {
     if (templateGroup) templateGroup.set({ opacity: 0 });
+    if (selectedPosterTemplate.id === 'custom') {
+      customSlotOverlayGroups.forEach((g) => g.set({ opacity: 0 }));
+    }
     paths = drawHistory.filter((p) => canvas.getObjects().includes(p));
     paths.forEach((p) => p.set({ opacity: 0 }));
   }
@@ -1709,8 +2220,10 @@ async function exportVideo() {
   if (useWebCodecs) {
     try {
       const blob = await encodeWithWebCodecs(streamCanvas, async () => {
-        if (isSilent) await runSilentPopIn();
-        else await runExportPlayback(paths, replay === 'char' ? 'char' : 'stroke', fx);
+        if (isSilent) {
+          if (replay === 'silent-sync') await runSilentSquashTogether();
+          else await runSilentPopIn();
+        } else await runExportPlayback(paths, playbackModeFromReplay(replay), fx);
       });
       anim = false;
       downloadBlob(blob, `手写Live_${Date.now()}.mp4`);
@@ -1739,9 +2252,10 @@ async function exportVideo() {
     }
 
     if (isSilent) {
-      await runSilentPopIn();
+      if (replay === 'silent-sync') await runSilentSquashTogether();
+      else await runSilentPopIn();
     } else {
-      await runExportPlayback(paths, replay === 'char' ? 'char' : 'stroke', fx);
+      await runExportPlayback(paths, playbackModeFromReplay(replay), fx);
     }
     anim = false;
     await new Promise((r) => setTimeout(r, 400));
@@ -1776,9 +2290,14 @@ async function exportVideo() {
 
 /** 「预览」：跑一遍回放动画但不录制不导出，让用户先看效果 */
 async function runPreview() {
-  const replay = (el('replay-mode') as HTMLSelectElement).value as 'stroke' | 'char' | 'silent';
+  const replay = (el('replay-mode') as HTMLSelectElement).value as
+    | 'stroke'
+    | 'char'
+    | 'char-sync'
+    | 'silent'
+    | 'silent-sync';
   const fx = (el('replay-fx') as HTMLSelectElement).value as ReplayFx;
-  const isSilent = replay === 'silent';
+  const isSilent = replay === 'silent' || replay === 'silent-sync';
   if (!isSilent && drawHistory.length === 0) {
     toast('还没有可预览的笔画；可在「回放」选「不写直出」');
     return;
@@ -1797,19 +2316,27 @@ async function runPreview() {
   if (isSilent) {
     detachSlotImagesFromGroup();
     if (templateGroup) templateGroup.set({ opacity: 0 });
+    if (selectedPosterTemplate.id === 'custom') {
+      customSlotOverlayGroups.forEach((g) => g.set({ opacity: 0 }));
+    }
     savedScales = slotFabricImages
       .filter((im): im is fabric.Image => !!im)
       .map((im) => ({ im, sx: im.scaleX || 1, sy: im.scaleY || 1, op: im.opacity ?? 1 }));
     savedScales.forEach((s) => s.im.set({ opacity: 0 }));
   } else {
     if (templateGroup) templateGroup.set({ opacity: 0 });
+    if (selectedPosterTemplate.id === 'custom') {
+      customSlotOverlayGroups.forEach((g) => g.set({ opacity: 0 }));
+    }
     paths = drawHistory.filter((p) => canvas.getObjects().includes(p));
     paths.forEach((p) => p.set({ opacity: 0 }));
   }
   canvas.renderAll();
 
-  if (isSilent) await runSilentPopIn();
-  else await runExportPlayback(paths, replay === 'char' ? 'char' : 'stroke', fx);
+  if (isSilent) {
+    if (replay === 'silent-sync') await runSilentSquashTogether();
+    else await runSilentPopIn();
+  } else await runExportPlayback(paths, playbackModeFromReplay(replay), fx);
 
   if (isSilent) {
     savedScales.forEach((s) => s.im.set({ scaleX: s.sx, scaleY: s.sy, opacity: s.op }));
@@ -1896,7 +2423,7 @@ function renderTraceSlotGuide() {
 function updateTraceModalTitle() {
   const slotIdx = traceSlotOrder[traceCursor];
   const circles = getCircleElements(selectedPosterTemplate);
-  const lab = circledSlotLabel(circles[slotIdx]?.n, slotIdx);
+  const lab = plainSlotLabel(circles[slotIdx]?.n, slotIdx);
   el('trace-title').textContent = `大字描写 · 字${lab}（${traceCursor + 1}/${traceSlotOrder.length}）`;
 }
 
@@ -2077,6 +2604,7 @@ function setupCanvasZoomPan() {
     if (!pinching) return;
     pinching = false;
     canvas.isDrawingMode = savedDrawingMode;
+    refreshAllCustomSlotGroupsCoords();
   };
   wrap.addEventListener('touchend', (e: TouchEvent) => {
     if (e.touches.length < 2) endPinch();
@@ -2093,6 +2621,7 @@ function setupCanvasZoomPan() {
       const local = localPoint(e.clientX, e.clientY);
       canvas.zoomToPoint(new fabric.Point(local.x, local.y), zoom);
       showReset();
+      refreshAllCustomSlotGroupsCoords();
     },
     { passive: false }
   );
@@ -2100,6 +2629,7 @@ function setupCanvasZoomPan() {
   resetBtn.addEventListener('click', () => {
     canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
     canvas.requestRenderAll();
+    refreshAllCustomSlotGroupsCoords();
     resetBtn.classList.add('hidden');
   });
 }
@@ -2116,6 +2646,26 @@ function init() {
   window.addEventListener('resize', resizeCanvas);
   setupCanvasZoomPan();
 
+  /**
+   * Fabric 命中嵌套 Group 时 findTarget 仍返回外层海报 Group，真正的圆位在 canvas.targets 里。
+   * 在默认选中逻辑运行前把 _target 换成自定义圆组，才能单选圆并拖/缩放。
+   */
+  canvas.on('mouse:down:before', () => {
+    if (step !== 1 && !(step === 2 && step2CanvasMode === 'poster')) return;
+    if (selectedPosterTemplate.id !== 'custom' || customPlaceNext) return;
+    /** 圆位已脱离父组，findTarget 直接命中顶层圆位，不必改 _target */
+    if (customSlotOverlayGroups.length) return;
+    const subs = (canvas as fabric.Canvas & { targets?: fabric.Object[] }).targets;
+    if (!subs?.length) return;
+    for (let i = subs.length - 1; i >= 0; i--) {
+      const t = subs[i] as fabric.Object & { customSlotIndex?: number };
+      if (t?.customSlotIndex != null) {
+        (canvas as fabric.Canvas & { _target?: fabric.Object })._target = t;
+        break;
+      }
+    }
+  });
+
   canvas.on('path:created', (e: { path?: fabric.Object }) => {
     if (traceModalOpen) return;
     let p = e.path;
@@ -2130,6 +2680,31 @@ function init() {
       (p as fabric.Group)._objects.forEach((sub) => sub.set({ strokeUniform: true }));
     }
     drawHistory.push(p);
+  });
+
+  canvas.on('mouse:down', (opt: { e?: Event }) => {
+    if (tryConsumeCustomPlace(opt)) {
+      opt.e?.preventDefault?.();
+      opt.e?.stopPropagation?.();
+      return;
+    }
+    queueMicrotask(() => refreshActiveCustomSlotCoords());
+  });
+
+  canvas.on('selection:created', () => {
+    queueMicrotask(() => refreshActiveCustomSlotCoords());
+  });
+  canvas.on('selection:updated', () => {
+    queueMicrotask(() => refreshActiveCustomSlotCoords());
+  });
+
+  canvas.on('object:modified', (opt: { target?: fabric.Object }) => {
+    const t = opt.target;
+    if (t && (t as fabric.Object & { customSlotIndex?: number }).customSlotIndex != null) {
+      onCustomSlotGroupModified(t);
+    } else if (t && templateGroup && t === templateGroup) {
+      positionCustomSlotOverlaysFromData();
+    }
   });
 
   el('input-photo').addEventListener('change', (ev) => {
@@ -2155,6 +2730,10 @@ function init() {
       return;
     }
     if (step === 1) {
+      if (selectedPosterTemplate.id === 'custom' && getCircleElements(customTemplate).length === 0) {
+        toast('自定义请先点「＋圆位」，在红框内放置至少一个圆');
+        return;
+      }
       setStep(2);
       return;
     }
@@ -2172,17 +2751,23 @@ function init() {
     }
   });
 
-  el('tpl-category').addEventListener('change', () => {
-    const items = filteredTemplates();
-    if (!items.some((t) => t.id === selectedPosterTemplate.id)) {
-      const next = items[0] || POSTER_TEMPLATES[0];
-      selectedPosterTemplate = next.id === 'custom' ? customTemplate : next;
-      placement = defaultPlacementForTemplate(selectedPosterTemplate);
-      syncSlotsForTemplateChange(true);
-      if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
-    }
-    renderTplList();
-    renderCustomEditor();
+  document.querySelectorAll('.tpl-cat-btn').forEach((btnEl) => {
+    btnEl.addEventListener('click', () => {
+      const cat = (btnEl as HTMLElement).dataset.cat;
+      if (!cat) return;
+      syncTplCatButtons(cat);
+      const items = filteredTemplates();
+      if (!items.some((t) => t.id === selectedPosterTemplate.id)) {
+        const next = items[0] || POSTER_TEMPLATES[0];
+        selectedPosterTemplate = next.id === 'custom' ? customTemplate : next;
+        placement = defaultPlacementForTemplate(selectedPosterTemplate);
+        syncSlotsForTemplateChange(true);
+        if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
+      }
+      renderTplList();
+      renderCustomEditor();
+      updatePanel1Tip();
+    });
   });
 
   el('tpl-list').addEventListener('click', (ev) => {
@@ -2196,53 +2781,43 @@ function init() {
     if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
     renderTplList();
     renderCustomEditor();
+    updatePanel1Tip();
   });
 
   el('btn-custom-add').addEventListener('click', () => {
     if (selectedPosterTemplate.id !== 'custom') return;
-    const circles = getCircleElements(customTemplate);
-    const k = circles.length + 1;
-    customTemplate.elements.push({
-      id: `custom-c${Date.now()}-${k}`,
-      type: 'circle',
-      n: String(k),
-      cx: 0.5 + ((k % 2 === 0 ? 1 : -1) * 0.08),
-      cy: 0.5 + ((k % 3 === 0 ? 1 : -1) * 0.06),
-      rx: 0.11,
-      ry: 0.11,
-    } as PosterCircleEl);
-    refreshCustomTemplateOnCanvas();
+    if (customPlaceNext) {
+      setCustomPlaceNext(false);
+      toast('已取消，可再点「＋圆位」');
+      return;
+    }
+    setCustomPlaceNext(true);
+    toast('请在红框内轻点，放置新圆心');
+  });
+
+  el('custom-labels')?.addEventListener('input', () => {
+    if (selectedPosterTemplate.id !== 'custom') return;
+    const raw = (el('custom-labels') as HTMLInputElement).value.replace(/\s/g, '');
+    const circles = getCircleElements(customTemplate) as PosterCircleEl[];
+    for (let i = 0; i < circles.length; i++) {
+      circles[i].n = raw[i] != null && raw[i] !== '' ? raw[i] : String(i + 1);
+    }
+    customTemplate.elements = circles;
+    selectedPosterTemplate = customTemplate;
+    renderCustomEditor();
+    syncCustomSlotLabelTexts();
+    if (step === 2) rebuildSlotButtons();
   });
 
   el('custom-slot-list').addEventListener('click', (ev) => {
-    const btn = (ev.target as HTMLElement).closest('.custom-del') as HTMLButtonElement | null;
+    const btn = (ev.target as HTMLElement).closest('.custom-chip-del') as HTMLButtonElement | null;
     if (!btn?.dataset.idx) return;
     const idx = Number(btn.dataset.idx);
     const circles = getCircleElements(customTemplate);
-    if (circles.length <= 1) {
-      toast('至少保留一个圆位');
-      return;
-    }
+    if (!Number.isFinite(idx) || idx < 0 || idx >= circles.length) return;
     circles.splice(idx, 1);
     customTemplate.elements = circles as PosterCircleEl[];
-    refreshCustomTemplateOnCanvas();
-  });
-
-  el('custom-slot-list').addEventListener('input', (ev) => {
-    const input = ev.target as HTMLInputElement;
-    const idx = Number(input.dataset.idx);
-    const key = input.dataset.k;
-    if (!Number.isFinite(idx) || !key) return;
-    const circles = getCircleElements(customTemplate) as PosterCircleEl[];
-    const c = circles[idx];
-    if (!c) return;
-    if (key === 'n') c.n = input.value.trim() || String(idx + 1);
-    if (key === 'cx') c.cx = Number(input.value) / 100;
-    if (key === 'cy') c.cy = Number(input.value) / 100;
-    if (key === 'rx') c.rx = Number(input.value) / 100;
-    if (key === 'ry') c.ry = Number(input.value) / 100;
-    customTemplate.elements = circles;
-    refreshCustomTemplateOnCanvas();
+    refreshCustomTemplateOnCanvas(true);
   });
 
   el('slot-row').addEventListener('click', (ev) => {
