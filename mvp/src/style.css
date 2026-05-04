@@ -1295,3 +1295,20 @@ body {
     transform: rotate(360deg);
   }
 }
+
+/* 本地字体目录：mvp/public/fonts/ → 访问路径 /fonts/文件名 */
+@font-face {
+  font-family: '沐瑶随心手写体';
+  src: url('/fonts/MuYaoSuiXinShouXieTi-2.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Chillzhuo';
+  src: url('/fonts/寒蝉手拙体.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}

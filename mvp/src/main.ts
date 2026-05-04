@@ -48,6 +48,14 @@ const drawHistory: fabric.Object[] = [];
 let currentSlot = 0;
 /** 槽位参考字 fabric.Image，与 slotUrls 同索引；从 templateGroup 解引用便于交互配置 */
 let slotFabricImages: (fabric.Image | null)[] = [];
+/** 第 2 步调字后相对圆心的局部偏移与相对「首次装入」的缩放倍率，供进第 3 步 / 重建模板时恢复 */
+let slotImageAdjustments: Array<{
+  offLX: number;
+  offLY: number;
+  scaleMul: number;
+  scaleMulY: number;
+  angle: number;
+} | null> = [];
 /** 自定义模板：圆位 Group 画布顶层（与海报 Group 分离），交互与第 2 步调字一致 */
 let customSlotOverlayGroups: fabric.Group[] = [];
 /** 第 3 步（面板）：poster＝拖整张模板；slot＝单独缩放/平移圈内参考字图 */
@@ -377,24 +385,30 @@ function layoutCustomSlotImagesWorldFromData() {
     if (templateGroup.contains(img)) return;
     const c = circles[i];
     if (!c) return;
-    const lx = c.cx * gw - gw / 2;
-    const ly = c.cy * gh - gh / 2;
+    const adj = slotImageAdjustments[i];
+    const lx = c.cx * gw - gw / 2 + (adj?.offLX ?? 0);
+    const ly = c.cy * gh - gh / 2 + (adj?.offLY ?? 0);
     const pt = fabric.util.transformPoint(new fabric.Point(lx, ly), M);
-    const ext = img as fabric.Image & { __baseFitScX?: number; __baseFitScY?: number };
-    let bx = ext.__baseFitScX;
-    let by = ext.__baseFitScY;
+    const ext = img as fabric.Image & {
+      __baseFitScX?: number;
+      __baseFitScY?: number;
+      __intrinsicFitScX?: number;
+      __intrinsicFitScY?: number;
+    };
+    let bx = ext.__intrinsicFitScX ?? ext.__baseFitScX;
+    let by = ext.__intrinsicFitScY ?? ext.__baseFitScY;
     if (bx == null || by == null) {
-      bx = (img.scaleX || 1) / tgsx;
-      by = (img.scaleY || 1) / tgsy;
-      ext.__baseFitScX = bx;
-      ext.__baseFitScY = by;
+      bx = (img.scaleX || 1) / tgsx / (adj?.scaleMul ?? 1);
+      by = (img.scaleY || 1) / tgsy / (adj?.scaleMulY ?? adj?.scaleMul ?? 1);
     }
+    const sm = adj?.scaleMul ?? 1;
+    const smY = adj?.scaleMulY ?? sm;
     img.set({
       left: pt.x,
       top: pt.y,
       angle: tg.angle ?? 0,
-      scaleX: bx * tgsx,
-      scaleY: by * tgsy,
+      scaleX: bx * tgsx * sm,
+      scaleY: by * tgsy * smY,
       originX: 'center',
       originY: 'center',
     });
@@ -614,6 +628,46 @@ function configureSlotFabricImage(img: fabric.Image, slotIndex: number) {
   });
 }
 
+/** 把槽位字图收进红框组后读取局部坐标，写入 slotImageAdjustments，供进下一步或重建时恢复 */
+function captureSlotImageAdjustments() {
+  if (!templateGroup) return;
+  ensureSlotLen();
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  const { gw, gh } = placementBoxPx(placement, cw, ch);
+  const { centers } = buildPosterTemplateParts(selectedPosterTemplate, gw, gh);
+  const wasDetachedSlot = step === 2 && step2CanvasMode === 'slot';
+
+  attachSlotImagesToGroup();
+
+  slotFabricImages.forEach((img, i) => {
+    if (!img) {
+      slotImageAdjustments[i] = null;
+      return;
+    }
+    const c = centers[i];
+    if (!c) {
+      slotImageAdjustments[i] = null;
+      return;
+    }
+    const ix =
+      (img as fabric.Image & { __intrinsicFitScX?: number }).__intrinsicFitScX ?? img.scaleX ?? 1;
+    const iy =
+      (img as fabric.Image & { __intrinsicFitScY?: number }).__intrinsicFitScY ?? img.scaleY ?? 1;
+    slotImageAdjustments[i] = {
+      offLX: (img.left ?? 0) - c.x,
+      offLY: (img.top ?? 0) - c.y,
+      scaleMul: (img.scaleX ?? 1) / ix,
+      scaleMulY: (img.scaleY ?? 1) / iy,
+      angle: img.angle ?? 0,
+    };
+  });
+
+  if (wasDetachedSlot) {
+    detachSlotImagesFromGroup();
+  }
+}
+
 function applyRefOpacity() {
   if (!templateGroup) return;
   if (step !== 3) {
@@ -807,11 +861,16 @@ function tryConsumeCustomPlace(opt: { e?: Event }): boolean {
 
 function syncSlotsForTemplateChange(clearUrls: boolean) {
   const n = getCircleElements(selectedPosterTemplate).length;
-  if (clearUrls) slotUrls = new Array(n).fill(null);
-  else {
+  if (clearUrls) {
+    slotUrls = new Array(n).fill(null);
+    slotImageAdjustments = new Array(n).fill(null);
+  } else {
     const next = new Array(n).fill(null);
+    const nextAdj = new Array(n).fill(null);
     for (let i = 0; i < Math.min(n, slotUrls.length); i++) next[i] = slotUrls[i];
+    for (let i = 0; i < Math.min(n, slotImageAdjustments.length); i++) nextAdj[i] = slotImageAdjustments[i];
     slotUrls = next;
+    slotImageAdjustments = nextAdj;
   }
   currentSlot = Math.min(currentSlot, Math.max(0, n - 1));
   if (step === 2) rebuildSlotButtons();
@@ -821,6 +880,8 @@ function ensureSlotLen() {
   const n = getCircleElements(selectedPosterTemplate).length;
   while (slotUrls.length < n) slotUrls.push(null);
   slotUrls.length = n;
+  while (slotImageAdjustments.length < n) slotImageAdjustments.push(null);
+  slotImageAdjustments.length = n;
   currentSlot = Math.min(currentSlot, Math.max(0, n - 1));
 }
 
@@ -940,9 +1001,18 @@ function rebuildTemplateWithImages(cb?: () => void) {
             configureSlotFabricImage(im, i);
             slotFabricImages[i] = im;
             canvas.add(im);
-            const ext = im as fabric.Image & { __baseFitScX?: number; __baseFitScY?: number };
-            ext.__baseFitScX = im.scaleX ?? 1;
-            ext.__baseFitScY = im.scaleY ?? 1;
+            const ix = im.scaleX ?? 1;
+            const iy = im.scaleY ?? 1;
+            const ext = im as fabric.Image & {
+              __baseFitScX?: number;
+              __baseFitScY?: number;
+              __intrinsicFitScX?: number;
+              __intrinsicFitScY?: number;
+            };
+            ext.__intrinsicFitScX = ix;
+            ext.__intrinsicFitScY = iy;
+            ext.__baseFitScX = ix;
+            ext.__baseFitScY = iy;
           }
           canvas.add(slotGrp);
           customSlotOverlayGroups.push(slotGrp);
@@ -959,6 +1029,21 @@ function rebuildTemplateWithImages(cb?: () => void) {
         const im = imgs[i];
         if (im) {
           configureSlotFabricImage(im, i);
+          const ix = im.scaleX ?? 1;
+          const iy = im.scaleY ?? 1;
+          const imRef = im as fabric.Image & { __intrinsicFitScX?: number; __intrinsicFitScY?: number };
+          imRef.__intrinsicFitScX = ix;
+          imRef.__intrinsicFitScY = iy;
+          const adj = slotImageAdjustments[i];
+          if (adj) {
+            im.set({
+              left: centers[i].x + adj.offLX,
+              top: centers[i].y + adj.offLY,
+              scaleX: ix * adj.scaleMul,
+              scaleY: iy * (adj.scaleMulY ?? adj.scaleMul),
+              angle: adj.angle ?? 0,
+            });
+          }
           slotFabricImages[i] = im;
           objs.push(im);
         }
@@ -1029,6 +1114,8 @@ function confirmWarp() {
   renderWarped(out.getContext('2d')!, srcBuf, warpState.corners, warpState.vx, warpState.hy, 512, 512);
   const url = out.toDataURL('image/png');
   slotUrls[currentSlot] = url;
+  ensureSlotLen();
+  slotImageAdjustments[currentSlot] = null;
   const circles = getCircleElements(selectedPosterTemplate);
   const lab = plainSlotLabel(circles[currentSlot]?.n, currentSlot);
   rebuildTemplateWithImages(() => {
@@ -2702,6 +2789,13 @@ function init() {
     const t = opt.target;
     if (t && (t as fabric.Object & { customSlotIndex?: number }).customSlotIndex != null) {
       onCustomSlotGroupModified(t);
+    } else if (
+      t &&
+      t.type === 'image' &&
+      (t as fabric.Image & { __slotIndex?: number }).__slotIndex != null &&
+      step === 2
+    ) {
+      captureSlotImageAdjustments();
     } else if (t && templateGroup && t === templateGroup) {
       positionCustomSlotOverlaysFromData();
     }
@@ -2742,8 +2836,10 @@ function init() {
         toast('请先在第 3 步完成第一个槽位的参考字');
         return;
       }
-      rebuildTemplateWithImages();
-      setStep(3);
+      captureSlotImageAdjustments();
+      rebuildTemplateWithImages(() => {
+        setStep(3);
+      });
       return;
     }
     if (step === 3) {
