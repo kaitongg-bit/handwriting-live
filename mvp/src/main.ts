@@ -1881,24 +1881,67 @@ function dropAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
   });
 }
 
+/** 回放「抖动」：抽帧感 + 非匀速混频位移，略带头尾粗细/旋转微变，避免单一水平正弦摆 */
 function shakeAnimateObject(obj: fabric.Object, dur: number): Promise<void> {
   return new Promise((resolve) => {
     const left0 = obj.left ?? 0;
-    const amp = Math.max(3, Math.min(10, (obj.strokeWidth as number) || 6));
+    const top0 = obj.top ?? 0;
+    const ang0 = obj.angle ?? 0;
+    const sx0 = obj.scaleX ?? 1;
+    const sy0 = obj.scaleY ?? 1;
+    const amp = Math.max(2.5, Math.min(9, (obj.strokeWidth as number) || 5));
+    const seed = ((left0 + top0 * 1.7) % 997) * 0.01;
+    const ph = [seed * 6.2, seed * 4.1 + 0.7, seed * 8.9 + 0.3];
+    /** 阶梯时间：像逐帧重描，又保留整体淡出包络 */
+    const holdSteps = Math.max(10, Math.min(22, Math.floor(dur / 55)));
+    const pathLike = obj.type === 'path';
+    const sw0 = pathLike ? (obj as fabric.Path).strokeWidth ?? 1 : 1;
+
     obj.set({ opacity: 0 });
-    obj.animate('opacity', 1, { duration: 120, onChange: () => canvas.renderAll() });
+    obj.animate('opacity', 1, { duration: 110, onChange: () => canvas.renderAll() });
     fabric.util.animate({
       startValue: 0,
       endValue: 1,
       duration: dur,
-      easing: fabric.util.ease.easeOutSine,
+      easing: fabric.util.ease.easeOutCubic,
       onChange: (t: number) => {
-        const decay = 1 - t;
-        obj.set({ left: left0 + Math.sin(t * 16 * Math.PI) * amp * decay });
+        const decay = Math.pow(1 - t, 0.82);
+        const denom = Math.max(1, holdSteps - 1);
+        const k = holdSteps > 1 ? Math.floor(t * holdSteps) / denom : t;
+        const a = Math.sin(k * 11.7 * Math.PI + ph[0]) * 0.42;
+        const b = Math.sin(k * 18.4 * Math.PI + ph[1]) * 0.38;
+        const c = Math.cos(k * 7.9 * Math.PI * 2 + ph[2]) * 0.2;
+        const jx = (a + b + c) * amp * decay;
+        const d = Math.cos(k * 13.2 * Math.PI + ph[0] * 0.5) * 0.48;
+        const e = Math.sin(k * 16.8 * Math.PI + ph[2]) * 0.52;
+        const jy = (d + e) * amp * 0.62 * decay;
+        const rot =
+          (Math.sin(k * 21.3 * Math.PI + ph[1]) * 0.55 + Math.cos(k * 9.6 * Math.PI + ph[0]) * 0.45) *
+          decay *
+          2.8;
+        const breathe =
+          1 +
+          (Math.sin(k * 29 * Math.PI + seed) * 0.008 + Math.cos(k * 17 * Math.PI + ph[2]) * 0.005) *
+            decay;
+        obj.set({
+          left: left0 + jx,
+          top: top0 + jy,
+          angle: ang0 + rot,
+          scaleX: sx0 * breathe,
+          scaleY: sy0 * (2 - breathe),
+        });
+        if (pathLike) {
+          const swPulse =
+            1 + (Math.sin(k * 26 * Math.PI + ph[2]) * 0.045 + Math.cos(k * 33 * Math.PI) * 0.025) * decay;
+          (obj as fabric.Path).set({ strokeWidth: sw0 * swPulse });
+        }
         canvas.renderAll();
       },
       onComplete: () => {
-        obj.set({ left: left0 });
+        obj.set({ left: left0, top: top0, angle: ang0, scaleX: sx0, scaleY: sy0 });
+        if (pathLike) {
+          (obj as fabric.Path).set({ strokeWidth: sw0 });
+        }
         canvas.renderAll();
         resolve();
       },
