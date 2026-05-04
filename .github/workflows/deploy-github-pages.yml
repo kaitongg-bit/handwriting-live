@@ -1,5 +1,10 @@
-# 构建 mvp/ 下 Vite 项目并发布到 GitHub Pages
-# 使用前请在仓库 Settings → Pages → Build and deployment → Source 选择「GitHub Actions」
+# 发布方式：把构建结果推到 gh-pages 分支（不走 deploy-pages，避免 Actions 里长时间卡在 updating_pages）
+#
+# 仓库 Settings → Pages → Build and deployment：
+#   Source 选 「Deploy from a branch」（不要选 GitHub Actions）
+#   Branch 选 gh-pages，Folder 选 / (root)
+# 首次成功运行后才会出现 gh-pages 分支，再在 Pages 里选该分支
+#
 name: Deploy GitHub Pages
 
 on:
@@ -10,18 +15,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
-# Pages 部署不要用 cancel-in-progress: true，否则新提交打断正在 publish 的流程，
-# 容易长时间卡在 updating_pages（官方示例对 Pages 也设为 false）
 concurrency:
   group: pages-deploy
   cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,22 +41,9 @@ jobs:
           npm ci
           npm run build
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Push to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: mvp/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: mvp/dist
+          force_orphan: true
