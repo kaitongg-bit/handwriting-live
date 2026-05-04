@@ -50,9 +50,10 @@ export class MultiPointElement {
     const shapeCount = this.opts.shapeCount;
     const color = this.opts.color;
     const boardZoom = (this.canvas.getZoom && this.canvas.getZoom()) || 1;
-    const rectSize = Math.ceil((drawWidth * 3) / boardZoom);
-    const radius = 6 / boardZoom;
-    const strokeWidth = 2 / boardZoom;
+    /** 原逻辑 radius 固定 6px，与滑杆无关 → 最细也像大块圆点；改为随笔刷粗细缩放 */
+    const radius = Math.max(0.65, Math.min(15, drawWidth * 0.72)) / boardZoom;
+    const strokeWidth = Math.max(0.45, Math.min(3.2, drawWidth * 0.11 + 0.35)) / boardZoom;
+    const rectSize = Math.ceil((drawWidth * 2.35) / boardZoom);
     const curX = points[points.length - 1].x;
     const curY = points[points.length - 1].y;
     const objects: any[] = [];

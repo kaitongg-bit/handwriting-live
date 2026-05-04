@@ -29,6 +29,15 @@ import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 let step = 0;
 let canvas: fabric.Canvas;
 let bgImage: fabric.Image | null = null;
+/** 纯色垫层异步生成序号，避免拖动色盘时多次 fromURL 叠旧层 */
+let solidBgFillGen = 0;
+
+/** 第 3 步槽位标签每屏最多显示个数，多出的用左右箭头翻页 */
+const SLOT_PAGE = 6;
+let slotPageStart = 0;
+
+const BOARD_BG_STORAGE_KEY = 'handwriting-live-board-bg';
+let boardBgColor = '#f4f1ea';
 let templateGroup: fabric.Group | null = null;
 let selectedPosterTemplate = POSTER_TEMPLATES[0];
 const baseCustomTemplate = POSTER_TEMPLATES.find((t) => t.id === 'custom');
@@ -42,6 +51,8 @@ let customTemplate: PosterTemplate = baseCustomTemplate
     };
 let placement = defaultPlacementForTemplate(selectedPosterTemplate);
 let slotUrls: (string | null)[] = [];
+/** 与槽位一一对应，田字格弹层里每个槽暂存的参考字（单字） */
+let slotWarpChars: string[] = [];
 let refVisible = true;
 /** 手写笔迹（含中空组等 fabric 对象） */
 const drawHistory: fabric.Object[] = [];
@@ -121,13 +132,38 @@ function syncTplCatButtons(cat: string) {
   });
 }
 
-function updatePanel1Tip() {
-  const tip = document.getElementById('panel-1-tip');
-  if (!tip || step !== 1) return;
-  tip.textContent =
-    selectedPosterTemplate.id === 'custom'
-      ? '点侧栏＋后在红框内落圆，圈内自动编号。拖橙框移圆，拖四角缩放，拖四边改扁圆。拖虚线框移整张 · 双指缩放'
-      : '点上方选模板 · 拖红框移动 · 双指缩放';
+function syncRefFloatUi() {
+  const b = document.getElementById('btn-ref-float');
+  if (!b) return;
+  b.classList.toggle('active', refVisible);
+  b.setAttribute('aria-pressed', refVisible ? 'true' : 'false');
+  b.title = refVisible ? '参考层：开（点按隐藏红框）' : '参考层：关（点按显示红框）';
+}
+
+function clampSlotPageToViewport() {
+  const circles = getCircleElements(selectedPosterTemplate);
+  const n = circles.length;
+  if (n <= SLOT_PAGE) {
+    slotPageStart = 0;
+    return;
+  }
+  if (currentSlot < slotPageStart) slotPageStart = currentSlot;
+  if (currentSlot >= slotPageStart + SLOT_PAGE) slotPageStart = currentSlot - SLOT_PAGE + 1;
+  slotPageStart = Math.max(0, Math.min(slotPageStart, n - SLOT_PAGE));
+}
+
+function openExportChoiceModal() {
+  const m = document.getElementById('export-choice-modal');
+  if (!m) return;
+  m.classList.remove('hidden');
+  m.setAttribute('aria-hidden', 'false');
+}
+
+function closeExportChoiceModal() {
+  const m = document.getElementById('export-choice-modal');
+  if (!m) return;
+  m.classList.add('hidden');
+  m.setAttribute('aria-hidden', 'true');
 }
 
 function getSelectedWarpFont() {
@@ -146,6 +182,492 @@ function toast(msg: string) {
   setTimeout(() => t.classList.remove('show'), 2200);
 }
 
+function getBoardBgColor(): string {
+  return boardBgColor || '#f4f1ea';
+}
+
+function loadBoardBgFromStorage() {
+  try {
+    const s = localStorage.getItem(BOARD_BG_STORAGE_KEY);
+    if (s && /^#[0-9A-Fa-f]{6}$/.test(s)) boardBgColor = s;
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/** 画布底色 + 画架区域一致（导出填充同色） */
+function applyBoardBgColor(hex: string, persist = true) {
+  boardBgColor = hex;
+  if (persist) {
+    try {
+      localStorage.setItem(BOARD_BG_STORAGE_KEY, hex);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  const inp = document.getElementById('board-bg-color') as HTMLInputElement | null;
+  if (inp && inp.value !== hex) inp.value = hex;
+  document.documentElement.style.setProperty('--stage-board-bg', hex);
+  const wrap = document.getElementById('stage-wrap');
+  if (wrap) wrap.style.background = hex;
+  if (!canvas) return;
+
+  const bi = bgImage as fabric.Image & { __isUserPhoto?: boolean };
+  const hasUserPhoto = Boolean(bgImage && bi.__isUserPhoto);
+
+  canvas.setBackgroundColor(hex, () => {
+    canvas.requestRenderAll();
+  });
+
+  /** 相册底图：只改 Fabric 背景与边缘，不替换照片 */
+  if (hasUserPhoto) return;
+
+  /** 纯色场景：必须重建铺满的垫层，否则仍显示上一个颜色的 4×4 拉伸图 */
+  if (bgImage) {
+    canvas.remove(bgImage);
+    bgImage = null;
+  }
+  ensureBgSolid();
+}
+
+function isBoardImageObject(o: fabric.Object): boolean {
+  return Boolean((o as fabric.Object & { __isBoardImage?: boolean }).__isBoardImage);
+}
+
+function ensureDrawHistoryOnTop() {
+  if (!canvas) return;
+  drawHistory.forEach((p) => {
+    if (!canvas!.getObjects().includes(p)) return;
+    canvas!.remove(p);
+    canvas!.add(p);
+  });
+}
+
+function getActiveBoardImage(): fabric.Image | null {
+  if (!canvas) return null;
+  const a = canvas.getActiveObject();
+  if (!a) return null;
+  if (a.type === 'image' && isBoardImageObject(a)) return a as fabric.Image;
+  if (a.type === 'activeSelection') {
+    const objs = (a as fabric.ActiveSelection)._objects;
+    if (objs?.length === 1 && objs[0].type === 'image' && isBoardImageObject(objs[0])) return objs[0] as fabric.Image;
+  }
+  return null;
+}
+
+/** 仅笔画：效果条；仅素材图：图层条；混选笔迹+图：效果条（效果只作用于笔迹） */
+function getEditFloatMode(): 'none' | 'stroke' | 'image' {
+  if (step !== 3 || !pathEditMode || traceModalOpen) return 'none';
+  if (!canvas) return 'none';
+  const objs = canvas.getActiveObjects();
+  if (!objs.length) return 'none';
+  if (objs.every(isBoardImageObject)) return 'image';
+  return 'stroke';
+}
+
+function moveBoardImageForward(img: fabric.Image) {
+  if (!canvas) return;
+  const objs = canvas.getObjects();
+  const i = objs.indexOf(img);
+  if (i < 0 || i >= objs.length - 1) return;
+  const next = objs[i + 1];
+  if (drawHistory.includes(next)) return;
+  img.bringForward(true);
+  ensureDrawHistoryOnTop();
+}
+
+function moveBoardImageBackward(img: fabric.Image) {
+  if (!canvas) return;
+  const objs = canvas.getObjects();
+  const i = objs.indexOf(img);
+  if (i <= 0) return;
+  const prev = objs[i - 1];
+  if (templateGroup && prev === templateGroup) return;
+  img.sendBackwards(true);
+  ensureDrawHistoryOnTop();
+}
+
+function boardImageToTopOfStack(img: fabric.Image) {
+  if (!canvas) return;
+  for (let g = 0; g < 500; g++) {
+    const objs = canvas.getObjects();
+    const i = objs.indexOf(img);
+    if (i < 0 || i >= objs.length - 1) break;
+    const next = objs[i + 1];
+    if (drawHistory.includes(next)) break;
+    img.bringForward(true);
+    ensureDrawHistoryOnTop();
+  }
+}
+
+function boardImageToBottomOfStack(img: fabric.Image) {
+  if (!canvas) return;
+  for (let g = 0; g < 500; g++) {
+    const objs = canvas.getObjects();
+    const i = objs.indexOf(img);
+    if (i <= 0) break;
+    const prev = objs[i - 1];
+    if (templateGroup && prev === templateGroup) break;
+    img.sendBackwards(true);
+    ensureDrawHistoryOnTop();
+  }
+}
+
+/** 把素材放在海报组之上、笔画之下 */
+function placeBoardImageInStack(img: fabric.Image) {
+  if (!canvas || !templateGroup) {
+    canvas?.add(img);
+    ensureDrawHistoryOnTop();
+    return;
+  }
+  canvas.add(img);
+  const objs = canvas.getObjects();
+  const ti = objs.indexOf(templateGroup);
+  if (ti >= 0) {
+    let guard = 0;
+    while (guard++ < 400 && canvas.getObjects().indexOf(img) > ti + 1) {
+      img.sendBackwards(true);
+    }
+  }
+  ensureDrawHistoryOnTop();
+}
+
+function syncBoardAssetInteraction() {
+  const edit = step === 3 && pathEditMode && !traceModalOpen;
+  canvas.getObjects().forEach((o) => {
+    if (!isBoardImageObject(o)) return;
+    o.set({
+      selectable: edit,
+      evented: edit,
+      hasControls: edit,
+      hasBorders: edit,
+    });
+  });
+}
+
+/** 原右侧图层条已迁至选中素材时的悬浮条（`#image-layer-float`） */
+function syncBoardLayerFab() {}
+
+function syncBoardAssetUI() {
+  syncBoardLayerFab();
+}
+
+/** 点击顶栏 1–4：可后退任意步；前进时按「下一步」同一套校验 */
+function tryGoToStep(target: number) {
+  const tgt = Math.max(0, Math.min(3, target));
+  if (tgt < step) {
+    setStep(tgt);
+    return;
+  }
+  while (step < tgt) {
+    if (step === 0) {
+      ensureBgSolid();
+      if (!templateGroup) createTemplateGroup(false);
+      setStep(1);
+      continue;
+    }
+    if (step === 1) {
+      if (selectedPosterTemplate.id === 'custom' && getCircleElements(customTemplate).length === 0) {
+        toast('自定义请先点「＋圆位」，在红框内放置至少一个圆');
+        return;
+      }
+      setStep(2);
+      continue;
+    }
+    if (step === 2) {
+      if (!slotUrls[0]) {
+        toast('请先在第 3 步完成第一个槽位的参考字');
+        return;
+      }
+      captureSlotImageAdjustments();
+      rebuildTemplateWithImages(() => {
+        setStep(3);
+      });
+      return;
+    }
+    break;
+  }
+}
+
+function exportStillPNG() {
+  if (!canvas) return;
+  canvas.discardActiveObject();
+  canvas.renderAll();
+  const sourceCanvas = canvas.lowerCanvasEl;
+  const { w, h } = computeExportVideoDimensions(sourceCanvas.width, sourceCanvas.height);
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const octx = out.getContext('2d')!;
+  octx.fillStyle = getBoardBgColor();
+  octx.fillRect(0, 0, w, h);
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = 'high';
+  octx.drawImage(
+    sourceCanvas,
+    0,
+    0,
+    sourceCanvas.width,
+    sourceCanvas.height,
+    0,
+    0,
+    w,
+    h,
+  );
+  out.toBlob(
+    (b) => {
+      if (b) {
+        downloadBlob(b, `手写字活_${Date.now()}.png`);
+        toast('已导出 PNG');
+      }
+    },
+    'image/png',
+    1,
+  );
+}
+
+function addBoardImageFromFile(file: File) {
+  if (!file.type.startsWith('image/')) return;
+  const url = URL.createObjectURL(file);
+  fabric.Image.fromURL(
+    url,
+    (img) => {
+      URL.revokeObjectURL(url);
+      const cw = canvas.getWidth() || 400;
+      const ch = canvas.getHeight() || 400;
+      const iw = img.width || 1;
+      const ih = img.height || 1;
+      const fit = Math.min((cw * 0.55) / iw, (ch * 0.55) / ih, 2);
+      img.set({
+        originX: 'center',
+        originY: 'center',
+        left: cw / 2,
+        top: ch / 2,
+        scaleX: fit,
+        scaleY: fit,
+      });
+      (img as fabric.Image & { __isBoardImage?: boolean }).__isBoardImage = true;
+      placeBoardImageInStack(img);
+      syncBoardAssetInteraction();
+      canvas.setActiveObject(img);
+      canvas.requestRenderAll();
+      toast('已添加素材；开「编辑」后可拖动，选中后可用悬浮条调层或裁剪');
+    },
+    { crossOrigin: 'anonymous' }
+  );
+}
+
+type ImageCropRuntime = {
+  fabricImg: fabric.Image;
+  el: HTMLImageElement;
+  nw: number;
+  nh: number;
+  offX: number;
+  offY: number;
+  dispScale: number;
+  logW: number;
+  logH: number;
+  dpr: number;
+  sel: { x: number; y: number; w: number; h: number };
+  drag: boolean;
+  ax: number;
+  ay: number;
+};
+
+let imageCropState: ImageCropRuntime | null = null;
+
+function closeImageCropModal() {
+  const m = document.getElementById('image-crop-modal');
+  if (m) {
+    m.classList.add('hidden');
+    m.setAttribute('aria-hidden', 'true');
+  }
+  imageCropState = null;
+}
+
+function paintImageCropCanvas() {
+  if (!imageCropState) return;
+  const cvs = document.getElementById('image-crop-canvas') as HTMLCanvasElement | null;
+  if (!cvs) return;
+  const s = imageCropState;
+  const { el: hel, offX, offY, dispScale, logW, logH, dpr, sel, nw, nh } = s;
+  cvs.width = Math.round(logW * dpr);
+  cvs.height = Math.round(logH * dpr);
+  const ctx = cvs.getContext('2d')!;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = '#0a0a0c';
+  ctx.fillRect(0, 0, logW, logH);
+  const dw = nw * dispScale;
+  const dh = nh * dispScale;
+  ctx.drawImage(hel, offX, offY, dw, dh);
+  const sx0 = offX + sel.x * dispScale;
+  const sy0 = offY + sel.y * dispScale;
+  const sw = sel.w * dispScale;
+  const sh = sel.h * dispScale;
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, 0, logW, sy0);
+  ctx.fillRect(0, sy0 + sh, logW, logH - (sy0 + sh));
+  ctx.fillRect(0, sy0, sx0, sh);
+  ctx.fillRect(sx0 + sw, sy0, logW - (sx0 + sw), sh);
+  ctx.strokeStyle = 'rgba(100, 200, 255, 0.95)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(sx0 + 0.5, sy0 + 0.5, Math.max(0, sw - 1), Math.max(0, sh - 1));
+  ctx.setLineDash([]);
+}
+
+function openImageCropModal() {
+  const img = getActiveBoardImage();
+  if (!img) {
+    toast('请先选中一张素材图');
+    return;
+  }
+  const hel = img._element as HTMLImageElement | undefined;
+  if (!hel || !hel.complete || !hel.naturalWidth) {
+    toast('图片未加载完成，请稍后再试');
+    return;
+  }
+  const nw = hel.naturalWidth;
+  const nh = hel.naturalHeight;
+  const logW = 360;
+  const logH = 280;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const scale = Math.min(logW / nw, logH / nh);
+  const dw = nw * scale;
+  const dh = nh * scale;
+  const offX = (logW - dw) / 2;
+  const offY = (logH - dh) / 2;
+  imageCropState = {
+    fabricImg: img,
+    el: hel,
+    nw,
+    nh,
+    offX,
+    offY,
+    dispScale: scale,
+    logW,
+    logH,
+    dpr,
+    sel: { x: 0, y: 0, w: nw, h: nh },
+    drag: false,
+    ax: 0,
+    ay: 0,
+  };
+  const m = document.getElementById('image-crop-modal');
+  if (m) {
+    m.classList.remove('hidden');
+    m.setAttribute('aria-hidden', 'false');
+  }
+  requestAnimationFrame(() => paintImageCropCanvas());
+}
+
+function imageCropPointerToNat(cvs: HTMLCanvasElement, clientX: number, clientY: number) {
+  if (!imageCropState) return { x: 0, y: 0 };
+  const r = cvs.getBoundingClientRect();
+  const lx = ((clientX - r.left) / r.width) * imageCropState.logW;
+  const ly = ((clientY - r.top) / r.height) * imageCropState.logH;
+  const { offX, offY, dispScale, nw, nh } = imageCropState;
+  let x = (lx - offX) / dispScale;
+  let y = (ly - offY) / dispScale;
+  x = Math.max(0, Math.min(nw, x));
+  y = Math.max(0, Math.min(nh, y));
+  return { x, y };
+}
+
+function imageCropClampSel(sel: { x: number; y: number; w: number; h: number }, nw: number, nh: number) {
+  let { x, y, w, h } = sel;
+  x = Math.max(0, Math.min(nw, x));
+  y = Math.max(0, Math.min(nh, y));
+  w = Math.max(0, Math.min(nw - x, w));
+  h = Math.max(0, Math.min(nh - y, h));
+  return { x, y, w, h };
+}
+
+function setupImageCropCanvasHandlers() {
+  const cvs = document.getElementById('image-crop-canvas') as HTMLCanvasElement | null;
+  if (!cvs) return;
+  const onDown = (ev: PointerEvent) => {
+    if (!imageCropState) return;
+    ev.preventDefault();
+    const { x, y } = imageCropPointerToNat(cvs, ev.clientX, ev.clientY);
+    imageCropState.drag = true;
+    imageCropState.ax = x;
+    imageCropState.ay = y;
+    try {
+      cvs.setPointerCapture(ev.pointerId);
+    } catch (_) {}
+  };
+  const onMove = (ev: PointerEvent) => {
+    if (!imageCropState || !imageCropState.drag) return;
+    const { x, y } = imageCropPointerToNat(cvs, ev.clientX, ev.clientY);
+    const ax = imageCropState.ax;
+    const ay = imageCropState.ay;
+    const nw = imageCropState.nw;
+    const nh = imageCropState.nh;
+    let rx = Math.min(ax, x);
+    let ry = Math.min(ay, y);
+    let rw = Math.abs(x - ax);
+    let rh = Math.abs(y - ay);
+    imageCropState.sel = imageCropClampSel({ x: rx, y: ry, w: rw, h: rh }, nw, nh);
+    paintImageCropCanvas();
+  };
+  const onUp = (ev: PointerEvent) => {
+    if (!imageCropState) return;
+    imageCropState.drag = false;
+    try {
+      cvs.releasePointerCapture(ev.pointerId);
+    } catch (_) {}
+    const { w, h } = imageCropState.sel;
+    if (w < 4 || h < 4) {
+      const nw = imageCropState.nw;
+      const nh = imageCropState.nh;
+      imageCropState.sel = { x: 0, y: 0, w: nw, h: nh };
+      paintImageCropCanvas();
+    }
+  };
+  cvs.addEventListener('pointerdown', onDown);
+  cvs.addEventListener('pointermove', onMove);
+  cvs.addEventListener('pointerup', onUp);
+  cvs.addEventListener('pointercancel', onUp);
+}
+
+function applyImageCropFromModal() {
+  if (!imageCropState || !canvas) return;
+  const { fabricImg, el: hel, sel, nw, nh } = imageCropState;
+  let { x, y, w, h } = imageCropClampSel(sel, nw, nh);
+  if (w < 2 || h < 2) {
+    toast('框选区域太小');
+    return;
+  }
+  const c = document.createElement('canvas');
+  c.width = Math.round(w);
+  c.height = Math.round(h);
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(hel, x, y, w, h, 0, 0, w, h);
+  const url = c.toDataURL('image/png');
+  const center = fabricImg.getCenterPoint();
+  const scaledW = fabricImg.getScaledWidth();
+  closeImageCropModal();
+  fabric.Image.fromURL(
+    url,
+    (newImg) => {
+      (newImg as fabric.Image & { __isBoardImage?: boolean }).__isBoardImage = true;
+      newImg.set({ originX: 'center', originY: 'center' });
+      newImg.scaleToWidth(scaledW);
+      newImg.setPositionByOrigin(center, 'center', 'center');
+      canvas.remove(fabricImg);
+      placeBoardImageInStack(newImg);
+      syncBoardAssetInteraction();
+      canvas.setActiveObject(newImg);
+      canvas.requestRenderAll();
+      syncEffectRowState();
+      toast('已裁剪');
+    },
+    { crossOrigin: 'anonymous' }
+  );
+}
+
 function setStep(n: number) {
   step = Math.max(0, Math.min(3, n));
   if (step !== 1) {
@@ -156,12 +678,23 @@ function setStep(n: number) {
   if (step !== 3) {
     pathEditMode = false;
   }
+  const stageRail = document.getElementById('stage-rail');
+  if (stageRail) stageRail.classList.toggle('hidden', step !== 3);
+  const s4f = document.getElementById('stage-step4-floats');
+  if (s4f) {
+    s4f.classList.toggle('hidden', step !== 3);
+    s4f.setAttribute('aria-hidden', step === 3 ? 'false' : 'true');
+  }
+  if (step === 3) syncRefFloatUi();
   if (n === 2) {
     step2CanvasMode = 'poster';
   }
   document.querySelectorAll('.steps .dot').forEach((d, i) => {
     d.classList.toggle('active', i === step);
     d.classList.toggle('done', i < step);
+    if (d instanceof HTMLButtonElement) {
+      d.setAttribute('aria-current', i === step ? 'step' : 'false');
+    }
   });
   for (let i = 0; i < 4; i++) {
     el(`panel-${i}`).classList.toggle('hidden', i !== step);
@@ -176,21 +709,16 @@ function setStep(n: number) {
     '可跳过，用浅色底。',
     '拖动整张红框到画面里你想写字的位置。',
     '生成参考字；点「调参考字」在圈内单独放缩、平移。',
-    '只写字。参考布局请在第 3 步定好。',
+    '成片设置在底部；编辑模式下选中笔画弹出效果条，仅选中素材图则弹出图层与裁剪条。',
   ];
   el('step-title').textContent = titles[step];
   el('step-hint').textContent = hints[step];
-  updatePanel1Tip();
   if (step === 2) rebuildSlotButtons();
 
   const back = el('btn-back');
   const next = el('btn-next');
   back.style.visibility = step === 0 ? 'hidden' : 'visible';
-  if (step === 3) {
-    next.textContent = '导出视频';
-  } else {
-    next.textContent = '下一步';
-  }
+  next.textContent = step === 3 ? '导出' : '下一步';
 
   applyStepMode();
   renderCustomEditor();
@@ -200,6 +728,13 @@ function resizeCanvas() {
   const wrap = el('stage-wrap');
   const r = wrap.getBoundingClientRect();
   canvas.setDimensions({ width: Math.max(200, r.width), height: Math.max(200, r.height) });
+  const solid = bgImage as fabric.Image & { __isSolidBg?: boolean };
+  if (bgImage && solid.__isSolidBg) {
+    solid.set({
+      scaleX: canvas.getWidth()! / 4,
+      scaleY: canvas.getHeight()! / 4,
+    });
+  }
   if (templateGroup && selectedPosterTemplate.id === 'custom') {
     positionCustomSlotOverlaysFromData();
   } else {
@@ -209,6 +744,14 @@ function resizeCanvas() {
     syncTraceCanvasSize();
     traceCanvas.renderAll();
   }
+  requestAnimationFrame(() => {
+    if (step === 3 && pathEditMode) {
+      const fs = document.getElementById('stroke-effect-float');
+      if (fs && !fs.classList.contains('hidden')) positionStrokeEffectFloat();
+      const fi = document.getElementById('image-layer-float');
+      if (fi && !fi.classList.contains('hidden')) positionImageLayerFloat();
+    }
+  });
 }
 
 function syncStep2Coach() {
@@ -236,8 +779,8 @@ function syncStep4Coach() {
   if (step !== 3 || !hint) return;
   if (traceModalOpen) return;
   hint.textContent = pathEditMode
-    ? '编辑模式：点选已写的笔迹，拖控制点调整。再点「编辑」恢复书写。'
-    : '本步只写字。参考布局请在第 3 步定好。';
+    ? '编辑：点选笔迹或素材；选中后上方可切换发光等效果，左侧可撤回/删除。'
+    : '自由书写；开「编辑」后可选中笔迹或图片调层、缩放。';
 }
 
 function applyStepMode() {
@@ -267,8 +810,11 @@ function applyStepMode() {
   }
   applySlotImagesInteraction();
   applyPathObjectsInteraction();
-  const pathBtn = el('btn-path-edit');
-  if (pathBtn) pathBtn.classList.toggle('active', pathEdit);
+  const pathBtn = document.getElementById('btn-path-edit');
+  if (pathBtn) {
+    pathBtn.classList.toggle('active', pathEdit);
+    pathBtn.setAttribute('aria-pressed', pathEdit ? 'true' : 'false');
+  }
   if (canvas) {
     if (step === 2 && step2CanvasMode === 'slot') {
       canvas.set({ cornerSize: 16, touchCornerSize: 28 });
@@ -291,6 +837,9 @@ function applyStepMode() {
   if (canvas.upperCanvasEl) (canvas.upperCanvasEl as HTMLCanvasElement).style.pointerEvents = pe;
   if (canvas.lowerCanvasEl) (canvas.lowerCanvasEl as HTMLCanvasElement).style.pointerEvents = pe;
   applyRefOpacity();
+  syncBoardAssetInteraction();
+  syncBoardAssetUI();
+  syncDeleteStrokeFab();
   canvas.renderAll();
 }
 
@@ -631,8 +1180,10 @@ function configureSlotFabricImage(img: fabric.Image, slotIndex: number) {
   img.off('mousedblclick');
   img.on('mousedblclick', (opt) => {
     if (opt.e && typeof opt.e.stopPropagation === 'function') opt.e.stopPropagation();
-    if (step !== 2 || step2CanvasMode !== 'slot') return;
+    if (step !== 2) return;
     currentSlot = slotIndex;
+    clampSlotPageToViewport();
+    rebuildSlotButtons();
     openWarpModal();
   });
 }
@@ -678,13 +1229,17 @@ function captureSlotImageAdjustments() {
 }
 
 function applyRefOpacity() {
-  if (!templateGroup) return;
+  if (!templateGroup) {
+    syncRefFloatUi();
+    return;
+  }
   if (step !== 3) {
     templateGroup.set({ opacity: 1 });
     if (selectedPosterTemplate.id === 'custom') {
       customSlotOverlayGroups.forEach((g) => g.set({ opacity: 1 }));
       slotFabricImages.forEach((im) => im && im.set({ opacity: 1 }));
     }
+    syncRefFloatUi();
     return;
   }
   /** 第 4 步：开 = 极淡（不抢戏），关 = 完全不可见 */
@@ -694,17 +1249,34 @@ function applyRefOpacity() {
     customSlotOverlayGroups.forEach((g) => g.set({ opacity: o }));
     slotFabricImages.forEach((im) => im && im.set({ opacity: o }));
   }
+  syncRefFloatUi();
 }
 
 function ensureBgSolid() {
-  if (bgImage) return;
+  if (!canvas) return;
+  const bi = bgImage as fabric.Image & { __isUserPhoto?: boolean };
+  if (bgImage && bi.__isUserPhoto) return;
+  /** 去掉重复的纯色垫（快速改色时异步回调可能叠加） */
+  canvas.getObjects().forEach((o) => {
+    if ((o as fabric.Image & { __isSolidBg?: boolean }).__isSolidBg) {
+      canvas.remove(o);
+    }
+  });
+  if (bgImage) {
+    canvas.remove(bgImage);
+    bgImage = null;
+  }
+  const gen = ++solidBgFillGen;
   const c = document.createElement('canvas');
   c.width = 4;
   c.height = 4;
   const x = c.getContext('2d')!;
-  x.fillStyle = '#f4f1ea';
+  x.fillStyle = getBoardBgColor();
   x.fillRect(0, 0, 4, 4);
   fabric.Image.fromURL(c.toDataURL(), (img) => {
+    if (!canvas || gen !== solidBgFillGen) return;
+    const cur = canvas.getActiveObject();
+    (img as fabric.Image & { __isSolidBg?: boolean }).__isSolidBg = true;
     img.set({
       selectable: false,
       evented: false,
@@ -719,6 +1291,7 @@ function ensureBgSolid() {
     img.sendToBack();
     bgImage = img;
     canvas.renderAll();
+    if (cur && canvas.getObjects().includes(cur)) canvas.setActiveObject(cur);
   });
 }
 
@@ -743,6 +1316,7 @@ function setBgFromFile(file: File) {
       });
       canvas.add(img);
       img.sendToBack();
+      (img as fabric.Image & { __isUserPhoto?: boolean }).__isUserPhoto = true;
       bgImage = img;
       URL.revokeObjectURL(url);
       canvas.renderAll();
@@ -904,6 +1478,7 @@ function syncSlotsForTemplateChange(clearUrls: boolean) {
   if (clearUrls) {
     slotUrls = new Array(n).fill(null);
     slotImageAdjustments = new Array(n).fill(null);
+    slotWarpChars = new Array(n).fill('字');
   } else {
     const next = new Array(n).fill(null);
     const nextAdj = new Array(n).fill(null);
@@ -911,6 +1486,9 @@ function syncSlotsForTemplateChange(clearUrls: boolean) {
     for (let i = 0; i < Math.min(n, slotImageAdjustments.length); i++) nextAdj[i] = slotImageAdjustments[i];
     slotUrls = next;
     slotImageAdjustments = nextAdj;
+    const nextC = new Array(n).fill('字');
+    for (let i = 0; i < Math.min(n, slotWarpChars.length); i++) nextC[i] = slotWarpChars[i];
+    slotWarpChars = nextC;
   }
   currentSlot = Math.min(currentSlot, Math.max(0, n - 1));
   if (step === 2) rebuildSlotButtons();
@@ -922,6 +1500,8 @@ function ensureSlotLen() {
   slotUrls.length = n;
   while (slotImageAdjustments.length < n) slotImageAdjustments.push(null);
   slotImageAdjustments.length = n;
+  while (slotWarpChars.length < n) slotWarpChars.push('字');
+  slotWarpChars.length = n;
   currentSlot = Math.min(currentSlot, Math.max(0, n - 1));
 }
 
@@ -929,14 +1509,34 @@ function rebuildSlotButtons() {
   const row = el('slot-row');
   row.innerHTML = '';
   const circles = getCircleElements(selectedPosterTemplate);
-  circles.forEach((ce, i) => {
+  const n = circles.length;
+  if (n > SLOT_PAGE) {
+    if (slotPageStart > Math.max(0, n - SLOT_PAGE)) slotPageStart = Math.max(0, n - SLOT_PAGE);
+    clampSlotPageToViewport();
+  } else {
+    slotPageStart = 0;
+  }
+  const prev = document.getElementById('slot-page-prev');
+  const next = document.getElementById('slot-page-next');
+  const showArrows = n > SLOT_PAGE;
+  if (prev) {
+    prev.classList.toggle('hidden', !showArrows);
+    (prev as HTMLButtonElement).disabled = slotPageStart <= 0;
+  }
+  if (next) {
+    next.classList.toggle('hidden', !showArrows);
+    (next as HTMLButtonElement).disabled = slotPageStart >= n - SLOT_PAGE;
+  }
+  const end = Math.min(n, slotPageStart + SLOT_PAGE);
+  for (let i = slotPageStart; i < end; i++) {
+    const ce = circles[i];
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'slot-btn' + (i === currentSlot ? ' active' : '');
     b.dataset.slot = String(i);
     b.textContent = `字${plainSlotLabel(ce.n, i)}`;
     row.appendChild(b);
-  });
+  }
 }
 
 /** 清理画布顶层已脱出的 slot 字图，避免重建后残留 */
@@ -1107,15 +1707,56 @@ srcBuf.width = SRC;
 srcBuf.height = SRC;
 const srcCtx = srcBuf.getContext('2d')!;
 
-function openWarpModal() {
+function syncWarpSlotNav() {
+  const n = getCircleElements(selectedPosterTemplate).length;
+  const prev = document.getElementById('warp-slot-prev') as HTMLButtonElement | null;
+  const next = document.getElementById('warp-slot-next') as HTMLButtonElement | null;
+  if (prev) prev.disabled = n <= 1 || currentSlot <= 0;
+  if (next) next.disabled = n <= 1 || currentSlot >= n - 1;
+}
+
+function warpNavigateSlot(delta: number) {
+  ensureSlotLen();
+  const chIn = (el('warp-char') as HTMLInputElement).value.trim().slice(-1) || '字';
+  slotWarpChars[currentSlot] = chIn;
+  const n = getCircleElements(selectedPosterTemplate).length;
+  currentSlot = Math.max(0, Math.min(n - 1, currentSlot + delta));
+  (el('warp-char') as HTMLInputElement).value = slotWarpChars[currentSlot] || '字';
+  const circles = getCircleElements(selectedPosterTemplate);
+  const lab = plainSlotLabel(circles[currentSlot]?.n, currentSlot);
+  const badge = document.getElementById('warp-slot-badge');
+  if (badge) badge.textContent = `字${lab}`;
+  warpState.corners = defaultCorners();
+  warpState.vx = 0.5;
+  warpState.hy = 0.5;
+  alignSlidersToState();
   const ch = (el('warp-char') as HTMLInputElement).value.trim().slice(-1) || '字';
+  renderSourceText(srcCtx, ch, getSelectedWarpFont(), SRC);
+  paintWarpPreview();
+  syncWarpSlotNav();
+  if (step === 2) {
+    clampSlotPageToViewport();
+    rebuildSlotButtons();
+  }
+}
+
+function openWarpModal() {
+  ensureSlotLen();
+  const ch = slotWarpChars[currentSlot] || '字';
+  (el('warp-char') as HTMLInputElement).value = ch;
+  const circles = getCircleElements(selectedPosterTemplate);
+  const lab = plainSlotLabel(circles[currentSlot]?.n, currentSlot);
+  const badge = document.getElementById('warp-slot-badge');
+  if (badge) badge.textContent = `字${lab}`;
   warpState.corners = defaultCorners();
   warpState.vx = 0.5;
   warpState.hy = 0.5;
   alignSlidersToState();
   renderSourceText(srcCtx, ch, getSelectedWarpFont(), SRC);
   paintWarpPreview();
+  syncWarpSlotNav();
   el('warp-modal').classList.remove('hidden');
+  el('warp-modal').setAttribute('aria-hidden', 'false');
   if (document.fonts && document.fonts.ready) {
     void document.fonts.ready.then(() => {
       if (el('warp-modal').classList.contains('hidden')) return;
@@ -1128,6 +1769,7 @@ function openWarpModal() {
 
 function closeWarpModal() {
   el('warp-modal').classList.add('hidden');
+  el('warp-modal').setAttribute('aria-hidden', 'true');
 }
 
 function paintWarpPreview() {
@@ -1146,6 +1788,7 @@ function readWarpSliders() {
 
 function confirmWarp() {
   const ch = (el('warp-char') as HTMLInputElement).value.trim().slice(-1) || '字';
+  slotWarpChars[currentSlot] = ch;
   renderSourceText(srcCtx, ch, getSelectedWarpFont(), SRC);
   readWarpSliders();
   const out = document.createElement('canvas');
@@ -1308,23 +1951,128 @@ function applyEffectToOne(o: fabric.Object, eff: 'none' | 'neon' | 'emboss' | 'k
   }
 }
 function applyEffectToSelected(eff: 'none' | 'neon' | 'emboss' | 'knockout') {
-  const objs = canvas.getActiveObjects();
+  const objs = canvas.getActiveObjects().filter((o) => !isBoardImageObject(o));
   if (!objs.length) return;
   objs.forEach((o) => applyEffectToOne(o, eff));
   canvas.requestRenderAll();
 }
 
-function syncEffectRowVisibility() {
-  el('effect-row').classList.toggle('hidden', !(step === 3 && pathEditMode));
+/** 悬浮条：贴在选中框上方（空间不够则换到下方），坐标随缩放/拖动更新 */
+function positionFloatingToolbar(toolbarId: string) {
+  const floatEl = document.getElementById(toolbarId);
+  if (!floatEl || !canvas || floatEl.classList.contains('hidden')) return;
+  const active = canvas.getActiveObject();
+  if (!active) return;
+
+  const bound = active.getBoundingRect(true);
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+  if (!cw || !ch) return;
+  const lower = canvas.lowerCanvasEl as HTMLCanvasElement | undefined;
+  if (!lower) return;
+
+  const wrap = el('stage-wrap');
+  const wrect = wrap.getBoundingClientRect();
+  const crect = lower.getBoundingClientRect();
+  const sx = crect.width / cw;
+  const sy = crect.height / ch;
+
+  const cx = bound.left + bound.width / 2;
+  const topEdge = bound.top;
+  const bottomEdge = bound.top + bound.height;
+
+  const leftPx = crect.left + cx * sx - wrect.left;
+  const topRefPx = crect.top + topEdge * sy - wrect.top;
+  const bottomRefPx = crect.top + bottomEdge * sy - wrect.top;
+
+  floatEl.style.left = `${leftPx}px`;
+  floatEl.style.top = `${topRefPx}px`;
+  floatEl.style.transform = 'translate(-50%, calc(-100% - 10px))';
+
+  requestAnimationFrame(() => {
+    const fh = floatEl.offsetHeight || 36;
+    const gap = 10;
+    const aboveTop = topRefPx - fh - gap;
+    if (aboveTop < 6) {
+      floatEl.style.top = `${bottomRefPx + gap}px`;
+      floatEl.style.transform = 'translate(-50%, 0)';
+    } else {
+      floatEl.style.top = `${topRefPx}px`;
+      floatEl.style.transform = 'translate(-50%, calc(-100% - 10px))';
+    }
+    const fw = floatEl.offsetWidth;
+    const pad = 8;
+    let anchor = leftPx;
+    if (anchor - fw / 2 < pad) anchor = pad + fw / 2;
+    if (anchor + fw / 2 > wrect.width - pad) anchor = wrect.width - pad - fw / 2;
+    floatEl.style.left = `${anchor}px`;
+  });
+}
+
+function positionStrokeEffectFloat() {
+  positionFloatingToolbar('stroke-effect-float');
+}
+
+function positionImageLayerFloat() {
+  positionFloatingToolbar('image-layer-float');
+}
+
+function syncEditFloats() {
+  const mode = getEditFloatMode();
+  const strokeEl = document.getElementById('stroke-effect-float');
+  const imageEl = document.getElementById('image-layer-float');
+  const showStroke = mode === 'stroke';
+  const showImage = mode === 'image';
+  if (strokeEl) {
+    strokeEl.classList.toggle('hidden', !showStroke);
+    strokeEl.setAttribute('aria-hidden', showStroke ? 'false' : 'true');
+  }
+  if (imageEl) {
+    imageEl.classList.toggle('hidden', !showImage);
+    imageEl.setAttribute('aria-hidden', showImage ? 'false' : 'true');
+  }
+  if (showStroke) requestAnimationFrame(() => positionStrokeEffectFloat());
+  if (showImage) requestAnimationFrame(() => positionImageLayerFloat());
+}
+
+function syncDeleteStrokeFab() {
+  const fab = document.getElementById('btn-delete-stroke-fab') as HTMLButtonElement | null;
+  if (!fab) return;
+  const show = step === 3 && pathEditMode && !traceModalOpen;
+  fab.classList.toggle('hidden', !show);
+  if (show) {
+    fab.disabled = !canvas.getActiveObjects().length;
+  } else {
+    fab.disabled = false;
+  }
+}
+
+function deleteSelectedStrokes() {
+  if (step !== 3 || !pathEditMode) return;
+  const objs = canvas.getActiveObjects();
+  if (!objs.length) {
+    toast('请先选中要删的笔画或图片');
+    return;
+  }
+  canvas.discardActiveObject();
+  objs.forEach((o) => {
+    const idx = drawHistory.indexOf(o);
+    if (idx >= 0) drawHistory.splice(idx, 1);
+    canvas.remove(o);
+  });
+  canvas.requestRenderAll();
+  syncEffectRowState();
 }
 
 function syncEffectRowState() {
-  syncEffectRowVisibility();
-  const a = canvas.getActiveObject();
-  const cur = a ? (a as fabric.Object & { customEffect?: string }).customEffect || 'none' : 'none';
-  document.querySelectorAll('#effect-row .effect-btn').forEach((b) => {
+  syncEditFloats();
+  const objs = canvas.getActiveObjects();
+  const ref = objs.find((o) => !isBoardImageObject(o));
+  const cur = ref ? (ref as fabric.Object & { customEffect?: string }).customEffect || 'none' : 'none';
+  document.querySelectorAll('#stroke-effect-float .effect-btn').forEach((b) => {
     b.classList.toggle('active', (b as HTMLElement).dataset.effect === cur);
   });
+  syncDeleteStrokeFab();
 }
 
 function updateTraceBrush() {
@@ -2062,21 +2810,26 @@ function animateObjectByFx(obj: fabric.Object, dur: number, fx: ReplayFx): Promi
   return dashAnimateObject(obj, dur);
 }
 
-/** Live Photo 风格目标总时长（ms）；默认约 3.2s，见 #live-duration */
+/** Live Photo 成片总时长（ms）；仅允许整数秒 1～10s，默认 3s，见 #live-duration（select） */
 const LIVE_DURATION_STORAGE_KEY = 'handwriting-live-live-ms';
-const LIVE_DURATION_DEFAULT_MS = 3200;
+const LIVE_DURATION_DEFAULT_MS = 3000;
+function clampLiveMs(ms: number): number {
+  const sec = Math.round(ms / 1000);
+  const s = Math.min(10, Math.max(1, sec));
+  return s * 1000;
+}
 
 function getLiveTargetMs(): number {
-  const input = document.getElementById('live-duration') as HTMLInputElement | null;
+  const input = document.getElementById('live-duration') as HTMLSelectElement | null;
   if (input?.value != null && input.value !== '') {
     const v = Number(input.value);
-    if (Number.isFinite(v)) return Math.min(8000, Math.max(1500, v));
+    if (Number.isFinite(v)) return clampLiveMs(v);
   }
   try {
     const s = localStorage.getItem(LIVE_DURATION_STORAGE_KEY);
     if (s != null) {
       const v = Number(s);
-      if (Number.isFinite(v)) return Math.min(8000, Math.max(1500, v));
+      if (Number.isFinite(v)) return clampLiveMs(v);
     }
   } catch (_) {
     /* ignore */
@@ -2084,13 +2837,39 @@ function getLiveTargetMs(): number {
   return LIVE_DURATION_DEFAULT_MS;
 }
 
-function syncLiveDurationLabel() {
-  const input = document.getElementById('live-duration') as HTMLInputElement | null;
-  const label = document.getElementById('live-duration-label');
-  if (!input || !label) return;
-  const ms = Number(input.value);
-  const sec = Number.isFinite(ms) ? ms / 1000 : LIVE_DURATION_DEFAULT_MS / 1000;
-  label.textContent = `${sec.toFixed(1)}s`;
+function syncLiveDurationSelect() {
+  const sel = document.getElementById('live-duration') as HTMLSelectElement | null;
+  if (!sel) return;
+  const ms = clampLiveMs(Number(sel.value) || LIVE_DURATION_DEFAULT_MS);
+  sel.value = String(ms);
+}
+
+function setupLiveDurationUi() {
+  const sel = document.getElementById('live-duration') as HTMLSelectElement | null;
+  if (!sel) return;
+
+  try {
+    const savedMs = localStorage.getItem(LIVE_DURATION_STORAGE_KEY);
+    if (savedMs != null) {
+      const v = Number(savedMs);
+      if (Number.isFinite(v)) sel.value = String(clampLiveMs(v));
+    } else {
+      sel.value = String(clampLiveMs(Number(sel.value) || LIVE_DURATION_DEFAULT_MS));
+    }
+  } catch (_) {
+    sel.value = String(LIVE_DURATION_DEFAULT_MS);
+  }
+  syncLiveDurationSelect();
+
+  sel.addEventListener('change', () => {
+    const ms = clampLiveMs(Number(sel.value) || LIVE_DURATION_DEFAULT_MS);
+    sel.value = String(ms);
+    try {
+      localStorage.setItem(LIVE_DURATION_STORAGE_KEY, sel.value);
+    } catch (_) {
+      /* ignore */
+    }
+  });
 }
 
 /** 将成片总时长（ms）严格均分为 n 段，整数毫秒、无 cap，各段之和恒等于 liveMs */
@@ -2484,7 +3263,7 @@ async function exportVideo() {
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.imageSmoothingEnabled = true;
     sctx.imageSmoothingQuality = 'high';
-    sctx.fillStyle = '#f4f1ea';
+    sctx.fillStyle = getBoardBgColor();
     sctx.fillRect(0, 0, streamCanvas.width, streamCanvas.height);
     sctx.drawImage(
       sourceCanvas,
@@ -2937,7 +3716,7 @@ const WELCOME_SPLASH_KEY = 'handwriting-live-welcome-v3';
 
 /** 开屏背景：大量随机位置/旋转/大小的字，寒蝉体 */
 function fillSplashBackgroundField(container: HTMLElement | null) {
-  if (!container) return;
+  if (!container || container.childElementCount > 0) return;
   const pool = ['字', '活', '手', '写', '墨', '笔', '纸', '砚'];
   const frag = document.createDocumentFragment();
   const n = 88;
@@ -2956,35 +3735,35 @@ function fillSplashBackgroundField(container: HTMLElement | null) {
   container.appendChild(frag);
 }
 
-/** 首访全屏欢迎：已定名产品、避免一进来像「裸工具页」 */
+function openLandingPage() {
+  const root = document.getElementById('splash');
+  if (!root) return;
+  const bg = document.getElementById('splash-bg');
+  if (bg && bg.childElementCount === 0) fillSplashBackgroundField(bg);
+  root.classList.remove('splash--dismissed', 'splash--out');
+  root.setAttribute('aria-hidden', 'false');
+}
+
+/** 首访全屏欢迎：关闭后不销毁节点，便于从顶栏字标再次打开 */
 function setupWelcomeSplash() {
   const root = document.getElementById('splash');
   if (!root) return;
-  if (document.documentElement.classList.contains('splash-seen')) {
-    root.remove();
-    return;
-  }
   fillSplashBackgroundField(document.getElementById('splash-bg'));
-  const btn = document.getElementById('splash-dismiss');
-  if (!btn) return;
-  const close = () => {
+  const dismiss = () => {
     try {
       localStorage.setItem(WELCOME_SPLASH_KEY, '1');
     } catch (_) {
       /* ignore */
     }
     document.documentElement.classList.add('splash-seen');
+    root.classList.add('splash--dismissed');
     root.setAttribute('aria-hidden', 'true');
-    root.classList.add('splash--out');
-    const done = () => {
-      root.remove();
-    };
-    root.addEventListener('transitionend', (e) => {
-      if (e.target === root) done();
-    });
-    window.setTimeout(done, 450);
   };
-  btn.addEventListener('click', close);
+  document.getElementById('splash-dismiss')?.addEventListener('click', dismiss);
+  if (document.documentElement.classList.contains('splash-seen')) {
+    root.classList.add('splash--dismissed');
+    root.setAttribute('aria-hidden', 'true');
+  }
 }
 
 /* ---------- 初始化 ---------- */
@@ -2996,6 +3775,10 @@ function init() {
     selection: true,
     preserveObjectStacking: true,
   });
+  loadBoardBgFromStorage();
+  const bgInp = document.getElementById('board-bg-color') as HTMLInputElement | null;
+  if (bgInp) bgInp.value = boardBgColor;
+  applyBoardBgColor(boardBgColor, false);
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
   setupCanvasZoomPan();
@@ -3034,7 +3817,7 @@ function init() {
       (p as fabric.Group)._objects.forEach((sub) => sub.set({ strokeUniform: true }));
     }
     /** 回放「按字（槽位）」依赖槽位索引；未写入则全部落入同一槽，观感等同「全体同步」 */
-    if (step === 3 || step === 4) {
+    if (step === 3) {
       (p as fabric.Object & { __slotIndex?: number }).__slotIndex = currentSlot;
     }
     drawHistory.push(p);
@@ -3051,9 +3834,11 @@ function init() {
 
   canvas.on('selection:created', () => {
     queueMicrotask(() => refreshActiveCustomSlotCoords());
+    syncBoardLayerFab();
   });
   canvas.on('selection:updated', () => {
     queueMicrotask(() => refreshActiveCustomSlotCoords());
+    syncBoardLayerFab();
   });
 
   canvas.on('object:modified', (opt: { target?: fabric.Object }) => {
@@ -3072,13 +3857,109 @@ function init() {
     }
   });
 
+  el('step-dots').addEventListener('click', (ev) => {
+    const b = (ev.target as HTMLElement).closest('button.dot') as HTMLButtonElement | null;
+    const ds = b?.dataset.step;
+    if (ds == null) return;
+    tryGoToStep(Number(ds));
+  });
+
+  document.getElementById('btn-home-logo')?.addEventListener('click', openLandingPage);
+
+  const onBoardBgPick = () => {
+    applyBoardBgColor((document.getElementById('board-bg-color') as HTMLInputElement).value);
+  };
+  document.getElementById('board-bg-color')?.addEventListener('input', onBoardBgPick);
+  document.getElementById('board-bg-color')?.addEventListener('change', onBoardBgPick);
+
+  document.getElementById('input-board-images')?.addEventListener('change', (e) => {
+    const inp = e.target as HTMLInputElement;
+    const fs = inp.files;
+    if (!fs?.length) return;
+    Array.from(fs).forEach((f) => addBoardImageFromFile(f));
+    inp.value = '';
+  });
+
+  document.getElementById('btn-float-layer-up')?.addEventListener('click', () => {
+    const img = getActiveBoardImage();
+    if (!img) {
+      toast('请先选中一张素材图');
+      return;
+    }
+    moveBoardImageForward(img);
+    canvas.requestRenderAll();
+    syncEffectRowState();
+  });
+  document.getElementById('btn-float-layer-down')?.addEventListener('click', () => {
+    const img = getActiveBoardImage();
+    if (!img) {
+      toast('请先选中一张素材图');
+      return;
+    }
+    moveBoardImageBackward(img);
+    canvas.requestRenderAll();
+    syncEffectRowState();
+  });
+  document.getElementById('btn-float-layer-top')?.addEventListener('click', () => {
+    const img = getActiveBoardImage();
+    if (!img) {
+      toast('请先选中一张素材图');
+      return;
+    }
+    boardImageToTopOfStack(img);
+    canvas.requestRenderAll();
+    syncEffectRowState();
+  });
+  document.getElementById('btn-float-layer-bottom')?.addEventListener('click', () => {
+    const img = getActiveBoardImage();
+    if (!img) {
+      toast('请先选中一张素材图');
+      return;
+    }
+    boardImageToBottomOfStack(img);
+    canvas.requestRenderAll();
+    syncEffectRowState();
+  });
+  document.getElementById('btn-float-image-crop')?.addEventListener('click', () => {
+    openImageCropModal();
+  });
+
+  document.getElementById('image-crop-close')?.addEventListener('click', closeImageCropModal);
+  document.getElementById('image-crop-cancel')?.addEventListener('click', closeImageCropModal);
+  document.getElementById('image-crop-apply')?.addEventListener('click', () => applyImageCropFromModal());
+  document.getElementById('image-crop-modal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('image-crop-modal')) closeImageCropModal();
+  });
+  setupImageCropCanvasHandlers();
+
+  document.getElementById('export-choice-close')?.addEventListener('click', closeExportChoiceModal);
+  document.getElementById('export-choice-modal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('export-choice-modal')) closeExportChoiceModal();
+  });
+  document.getElementById('export-opt-video')?.addEventListener('click', () => {
+    closeExportChoiceModal();
+    if (step !== 3) {
+      toast('请先到第 4 步再导出');
+      return;
+    }
+    void exportVideo();
+  });
+  document.getElementById('export-opt-png')?.addEventListener('click', () => {
+    closeExportChoiceModal();
+    if (step !== 3) {
+      toast('请先到第 4 步再导出');
+      return;
+    }
+    exportStillPNG();
+  });
+
   el('input-photo').addEventListener('change', (ev) => {
     const f = (ev.target as HTMLInputElement).files?.[0];
     if (f) setBgFromFile(f);
   });
   el('btn-skip-photo').addEventListener('click', () => {
-    ensureBgSolid();
-    toast('已使用浅色底');
+    applyBoardBgColor('#ffffff', true);
+    toast('已使用白底');
   });
 
   el('btn-back').addEventListener('click', () => {
@@ -3114,7 +3995,8 @@ function init() {
       return;
     }
     if (step === 3) {
-      void exportVideo();
+      openExportChoiceModal();
+      return;
     }
   });
 
@@ -3133,7 +4015,6 @@ function init() {
       }
       renderTplList();
       renderCustomEditor();
-      updatePanel1Tip();
     });
   });
 
@@ -3151,7 +4032,6 @@ function init() {
     if (templateGroup && (step === 1 || step === 2)) createTemplateGroup(false);
     syncTplPickerUI();
     renderCustomEditor();
-    updatePanel1Tip();
     closeTplPicker();
   });
 
@@ -3187,12 +4067,25 @@ function init() {
     const btn = (ev.target as HTMLElement).closest('.slot-btn') as HTMLButtonElement | null;
     if (!btn || btn.dataset.slot == null) return;
     currentSlot = Number(btn.dataset.slot) || 0;
-    el('slot-row').querySelectorAll('.slot-btn').forEach((x) => {
-      x.classList.toggle('active', Number((x as HTMLElement).dataset.slot) === currentSlot);
-    });
+    clampSlotPageToViewport();
+    rebuildSlotButtons();
+    if (step === 2) openWarpModal();
   });
 
-  el('btn-open-warp').addEventListener('click', openWarpModal);
+  document.getElementById('slot-page-prev')?.addEventListener('click', () => {
+    if (slotPageStart <= 0) return;
+    slotPageStart = Math.max(0, slotPageStart - SLOT_PAGE);
+    rebuildSlotButtons();
+  });
+  document.getElementById('slot-page-next')?.addEventListener('click', () => {
+    const n = getCircleElements(selectedPosterTemplate).length;
+    if (slotPageStart + SLOT_PAGE >= n) return;
+    slotPageStart = Math.min(n - SLOT_PAGE, slotPageStart + SLOT_PAGE);
+    rebuildSlotButtons();
+  });
+
+  document.getElementById('warp-slot-prev')?.addEventListener('click', () => warpNavigateSlot(-1));
+  document.getElementById('warp-slot-next')?.addEventListener('click', () => warpNavigateSlot(1));
   el('warp-close').addEventListener('click', closeWarpModal);
   el('warp-ok').addEventListener('click', confirmWarp);
 
@@ -3218,6 +4111,7 @@ function init() {
     readWarpSliders();
     const ch = (el('warp-char') as HTMLInputElement).value.trim().slice(-1) || '字';
     (el('warp-char') as HTMLInputElement).value = ch;
+    slotWarpChars[currentSlot] = ch;
     renderSourceText(srcCtx, ch, getSelectedWarpFont(), SRC);
     paintWarpPreview();
   });
@@ -3227,6 +4121,7 @@ function init() {
     const ch = (el('warp-char') as HTMLInputElement).value.trim().slice(-1) || '字';
     if ((el('warp-char') as HTMLInputElement).value !== ch)
       (el('warp-char') as HTMLInputElement).value = ch;
+    slotWarpChars[currentSlot] = ch;
     renderSourceText(srcCtx, ch, getSelectedWarpFont(), SRC);
     paintWarpPreview();
   });
@@ -3324,33 +4219,13 @@ function init() {
     if (step === 3 && pathEditMode) applyWidthToSelected(brushSize);
   });
 
-  const liveDurEl = document.getElementById('live-duration') as HTMLInputElement | null;
-  if (liveDurEl) {
-    try {
-      const savedMs = localStorage.getItem(LIVE_DURATION_STORAGE_KEY);
-      if (savedMs != null) {
-        const v = Number(savedMs);
-        if (Number.isFinite(v)) liveDurEl.value = String(Math.min(8000, Math.max(1500, v)));
-      }
-    } catch (_) {
-      /* ignore */
-    }
-    syncLiveDurationLabel();
-    liveDurEl.addEventListener('input', () => {
-      syncLiveDurationLabel();
-      try {
-        localStorage.setItem(LIVE_DURATION_STORAGE_KEY, liveDurEl.value);
-      } catch (_) {
-        /* ignore */
-      }
-    });
-  }
+  setupLiveDurationUi();
 
   setupBrushModal();
 
-  el('btn-ref').addEventListener('click', () => {
+  document.getElementById('btn-ref-float')?.addEventListener('click', () => {
+    if (step !== 3) return;
     refVisible = !refVisible;
-    el('ref-label').textContent = refVisible ? '开' : '关';
     applyRefOpacity();
     canvas.renderAll();
   });
@@ -3373,40 +4248,51 @@ function init() {
     if (step !== 3) return;
     pathEditMode = !pathEditMode;
     applyStepMode();
-    syncEffectRowVisibility();
+    syncEffectRowState();
     if (!pathEditMode) canvas.discardActiveObject();
     toast(
       pathEditMode
-        ? '编辑模式：点选笔画后用上方颜色 / 粗细 / 效果即时调整'
-        : '已恢复自由写字'
+        ? '编辑：点选笔画或素材；笔画显示效果条，仅选素材图显示图层与裁剪（删除用左侧垃圾桶）'
+        : '已恢复自由书写'
     );
   });
 
-  el('effect-row').addEventListener('click', (ev) => {
+  document.getElementById('stroke-effect-float')?.addEventListener('click', (ev) => {
     const t = (ev.target as HTMLElement).closest('.effect-btn') as HTMLButtonElement | null;
     if (!t) return;
     const eff = t.dataset.effect as 'none' | 'neon' | 'emboss' | 'knockout';
-    document.querySelectorAll('#effect-row .effect-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('#stroke-effect-float .effect-btn').forEach((b) => b.classList.remove('active'));
     t.classList.add('active');
     applyEffectToSelected(eff);
+    requestAnimationFrame(() => positionStrokeEffectFloat());
   });
 
-  el('btn-delete-stroke').addEventListener('click', () => {
-    const objs = canvas.getActiveObjects();
-    if (!objs.length) return;
-    canvas.discardActiveObject();
-    objs.forEach((o) => {
-      const idx = drawHistory.indexOf(o);
-      if (idx >= 0) drawHistory.splice(idx, 1);
-      canvas.remove(o);
-    });
-    canvas.requestRenderAll();
-    syncEffectRowState();
+  document.getElementById('btn-delete-stroke-fab')?.addEventListener('click', () => {
+    if (step !== 3 || !pathEditMode) return;
+    deleteSelectedStrokes();
   });
 
   canvas.on('selection:created', syncEffectRowState);
   canvas.on('selection:updated', syncEffectRowState);
-  canvas.on('selection:cleared', syncEffectRowState);
+  canvas.on('selection:cleared', () => {
+    syncEffectRowState();
+    syncBoardLayerFab();
+  });
+
+  const scheduleRepositionEditFloats = () => {
+    requestAnimationFrame(() => {
+      if (step !== 3 || !pathEditMode) return;
+      const fs = document.getElementById('stroke-effect-float');
+      if (fs && !fs.classList.contains('hidden')) positionStrokeEffectFloat();
+      const fi = document.getElementById('image-layer-float');
+      if (fi && !fi.classList.contains('hidden')) positionImageLayerFloat();
+    });
+  };
+  for (const ev of ['object:moving', 'object:scaling', 'object:rotating', 'object:modified'] as const) {
+    canvas.on(ev, scheduleRepositionEditFloats);
+  }
+  canvas.on('mouse:wheel', scheduleRepositionEditFloats);
+  window.addEventListener('resize', scheduleRepositionEditFloats);
 
   el('btn-trace-big').addEventListener('click', () => {
     if (step !== 3) return;
