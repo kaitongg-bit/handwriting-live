@@ -2093,6 +2093,14 @@ function syncLiveDurationLabel() {
   label.textContent = `${sec.toFixed(1)}s`;
 }
 
+/** 将成片总时长（ms）严格均分为 n 段，整数毫秒、无 cap，各段之和恒等于 liveMs */
+function strictSegmentDurations(liveMs: number, n: number): number[] {
+  const c = Math.max(1, n);
+  const base = Math.floor(liveMs / c);
+  const rem = liveMs - base * c;
+  return Array.from({ length: c }, (_, i) => base + (i < rem ? 1 : 0));
+}
+
 function playbackModeFromReplay(replay: string): 'stroke' | 'char' | 'char-sync' {
   if (replay === 'char-sync') return 'char-sync';
   if (replay === 'char') return 'char';
@@ -2104,6 +2112,8 @@ async function runExportPlayback(
   mode: 'stroke' | 'char' | 'char-sync' = 'stroke',
   fx: ReplayFx = 'dash'
 ) {
+  const liveMs = getLiveTargetMs();
+
   if (mode === 'char-sync') {
     const bucket = new Map<number, fabric.Object[]>();
     for (const p of paths) {
@@ -2115,9 +2125,8 @@ async function runExportPlayback(
     const keys = [...bucket.keys()].sort((a, b) => a - b);
     const all = keys.flatMap((k) => bucket.get(k)!);
     if (!all.length) return;
-    /** 全体同步一波：时长贴近滑杆（略留边以免边界帧截断） */
-    const dur = Math.max(360, Math.min(7800, getLiveTargetMs() - 80));
-    await Promise.all(all.map((o) => animateObjectByFx(o, dur, fx)));
+    /** 全体同步：所有笔画同一时段播完，总时长严格等于成片时长 */
+    await Promise.all(all.map((o) => animateObjectByFx(o, liveMs, fx)));
     return;
   }
   if (mode === 'char') {
@@ -2129,37 +2138,31 @@ async function runExportPlayback(
       bucket.get(key)!.push(p);
     }
     const keys = [...bucket.keys()].sort((a, b) => a - b);
-    const n = Math.max(1, keys.length);
-    const liveMs = getLiveTargetMs();
-    const dur = Math.max(220, Math.min(800, Math.floor(liveMs / n) - 60));
-    /** n 段动画 + (n-1) 个间隔 = liveMs；间隔只在「段与段之间」，不在最后一段后再停一次 */
-    const gap =
-      n <= 1 ? 0 : Math.max(40, Math.floor((liveMs - dur * n) / (n - 1)));
+
+    /** 旧稿或主画布未写 __slotIndex 时：全部进 998；多笔时退化为按 draw 顺序逐笔播，与「全体同步」区分 */
+    if (keys.length === 1 && keys[0] === 998 && (bucket.get(998)?.length ?? 0) > 1) {
+      const flat = bucket.get(998)!;
+      const durs = strictSegmentDurations(liveMs, flat.length);
+      for (let i = 0; i < flat.length; i++) {
+        await animateObjectByFx(flat[i], durs[i], fx);
+      }
+      return;
+    }
+
+    const kLen = Math.max(1, keys.length);
+    const durs = strictSegmentDurations(liveMs, kLen);
     for (let i = 0; i < keys.length; i++) {
       const grp = bucket.get(keys[i])!;
+      const dur = durs[i];
       await Promise.all(grp.map((o) => animateObjectByFx(o, dur, fx)));
-      if (i < keys.length - 1) await new Promise((r) => setTimeout(r, gap));
-      else if (n === 1)
-        await new Promise((r) =>
-          setTimeout(r, Math.max(0, Math.floor(liveMs - dur))),
-        );
     }
     return;
   }
   const valid = paths.filter((p) => canvas.getObjects().includes(p));
   const n = Math.max(1, valid.length);
-  const liveMs = getLiveTargetMs();
-  const dur = Math.max(80, Math.min(600, Math.floor(liveMs / n) - 20));
-  const gap =
-    n <= 1 ? 0 : Math.max(8, Math.floor((liveMs - dur * n) / (n - 1)));
+  const durs = strictSegmentDurations(liveMs, n);
   for (let i = 0; i < valid.length; i++) {
-    const p = valid[i];
-    await animateObjectByFx(p, dur, fx);
-    if (i < valid.length - 1) await new Promise((r) => setTimeout(r, gap));
-    else if (n === 1)
-      await new Promise((r) =>
-        setTimeout(r, Math.max(0, Math.floor(liveMs - dur))),
-      );
+    await animateObjectByFx(valid[i], durs[i], fx);
   }
 }
 
@@ -2171,13 +2174,11 @@ async function runSilentPopIn() {
   if (!ordered.length) return;
   const n = ordered.length;
   const liveMs = getLiveTargetMs();
-  const dur = Math.max(280, Math.min(900, Math.floor(liveMs / n) - 80));
-  const gap =
-    n <= 1 ? 0 : Math.max(60, Math.floor((liveMs - dur * n) / (n - 1)));
+  const durs = strictSegmentDurations(liveMs, n);
   for (let i = 0; i < ordered.length; i++) {
     const { im } = ordered[i];
-    const tailMs =
-      i < ordered.length - 1 ? gap : n === 1 ? Math.max(0, Math.floor(liveMs - dur)) : 0;
+    const dur = durs[i];
+    const tailMs = 0;
     const sx = im.scaleX || 1;
     const sy = im.scaleY || 1;
     im.set({ scaleX: sx * 0.82, scaleY: sy * 0.82, opacity: 0 });
@@ -2207,7 +2208,7 @@ async function runSilentSquashTogether() {
     .map((im, i) => ({ im, i }))
     .filter((x) => !!x.im && !!slotUrls[x.i]) as { im: fabric.Image; i: number }[];
   if (!ordered.length) return;
-  const dur = Math.max(420, Math.min(2600, getLiveTargetMs() - 180));
+  const dur = getLiveTargetMs();
   await Promise.all(
     ordered.map(
       ({ im }) =>
@@ -3031,6 +3032,10 @@ function init() {
     });
     if ((p as fabric.Group)._objects) {
       (p as fabric.Group)._objects.forEach((sub) => sub.set({ strokeUniform: true }));
+    }
+    /** 回放「按字（槽位）」依赖槽位索引；未写入则全部落入同一槽，观感等同「全体同步」 */
+    if (step === 3 || step === 4) {
+      (p as fabric.Object & { __slotIndex?: number }).__slotIndex = currentSlot;
     }
     drawHistory.push(p);
   });
